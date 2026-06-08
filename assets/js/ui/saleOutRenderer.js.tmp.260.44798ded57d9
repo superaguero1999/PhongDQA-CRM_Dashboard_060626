@@ -1,0 +1,525 @@
+const SaleOutRenderer = (() => {
+  let _saleoutData = [];
+  let _errorData   = [];
+  let _filters     = { months: [], shortNames: [] };
+  let _activeSubTab = 'data';
+  let _chartProduct = null;
+  let _chartMonth   = null;
+
+  const COLORS = APP_CONFIG ? APP_CONFIG.chartColors : [
+    '#3B82F6','#EF4444','#10B981','#F59E0B','#8B5CF6',
+    '#06B6D4','#EC4899','#84CC16','#F97316','#6366F1',
+  ];
+
+  function _el(id) { return document.getElementById(id); }
+
+  // ── Sub-tab switching ────────────────────────────────────────────────────
+  function _activateSubTab(which) {
+    _activeSubTab = which;
+    const dataEl = _el('saleout-data-subsection');
+    const rateEl = _el('saleout-rate-subsection');
+    const btnData = _el('subtab-saleout-data');
+    const btnRate = _el('subtab-saleout-rate');
+
+    if (dataEl) dataEl.style.display = which === 'data' ? '' : 'none';
+    if (rateEl) rateEl.style.display = which === 'rate' ? '' : 'none';
+
+    const activeClass   = ['border-blue-600', 'text-blue-600'];
+    const inactiveClass = ['border-transparent', 'text-gray-500', 'hover:text-gray-700'];
+    if (btnData) {
+      btnData.classList[which === 'data' ? 'add' : 'remove'](...activeClass);
+      btnData.classList[which === 'data' ? 'remove' : 'add'](...inactiveClass);
+    }
+    if (btnRate) {
+      btnRate.classList[which === 'rate' ? 'add' : 'remove'](...activeClass);
+      btnRate.classList[which === 'rate' ? 'remove' : 'add'](...inactiveClass);
+    }
+
+    if (which === 'rate') _renderRateSection();
+  }
+
+  // ── Sidebar filter (pill buttons — giống slicer "Biểu đồ tổng") ──────────
+  function renderSidebar() {
+    const container = _el('saleout-sidebar-content');
+    if (!container) return;
+
+    if (_saleoutData.length === 0) {
+      container.innerHTML = '<p class="text-xs text-gray-400 italic p-2">Chưa có dữ liệu Sale Out</p>';
+      return;
+    }
+
+    const allMonths   = ErrorRateService.getUniqueMonths(_saleoutData);
+    const allProducts = ErrorRateService.getUniqueProducts(_saleoutData);
+
+    function _pill(type, value) {
+      const active = _filters[type === 'month' ? 'months' : 'shortNames'];
+      const isActive = active.length === 0 || active.includes(value);
+      const cls = isActive
+        ? 'bg-blue-600 text-white border-blue-600 hover:bg-blue-700'
+        : 'bg-white text-gray-500 border-gray-200 hover:border-blue-400 hover:text-blue-600';
+      return `<button class="so-pill text-xs px-1.5 py-0.5 rounded border transition-colors ${cls}"
+                data-type="${type}" data-value="${value.replace(/"/g,'&quot;')}">${value}</button>`;
+    }
+
+    container.innerHTML = `
+      <div class="mb-3">
+        <div class="flex items-center justify-between mb-1.5">
+          <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Tháng</p>
+          <button class="so-clear text-xs text-blue-500 hover:underline" data-type="month">Tất cả</button>
+        </div>
+        <div class="flex flex-wrap gap-1 max-h-44 overflow-y-auto">
+          ${allMonths.map(m => _pill('month', m)).join('')}
+        </div>
+      </div>
+      <div>
+        <div class="flex items-center justify-between mb-1.5">
+          <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Sản phẩm</p>
+          <button class="so-clear text-xs text-blue-500 hover:underline" data-type="product">Tất cả</button>
+        </div>
+        <div class="flex flex-wrap gap-1 max-h-52 overflow-y-auto">
+          ${allProducts.map(p => _pill('product', p)).join('')}
+        </div>
+      </div>`;
+
+    container.querySelectorAll('.so-pill').forEach(btn => {
+      btn.addEventListener('click', () => _togglePill(btn.dataset.type, btn.dataset.value));
+    });
+
+    container.querySelectorAll('.so-clear').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.dataset.type === 'month') _filters.months = [];
+        else _filters.shortNames = [];
+        renderSidebar();
+        _onFilterApply();
+      });
+    });
+  }
+
+  // Toggle pill: [] = tất cả active; có giá trị = chỉ hiện giá trị đó
+  function _togglePill(type, value) {
+    const isMonth = type === 'month';
+    const current = isMonth ? _filters.months : _filters.shortNames;
+    const all     = isMonth ? ErrorRateService.getUniqueMonths(_saleoutData)
+                            : ErrorRateService.getUniqueProducts(_saleoutData);
+    let next;
+    if (current.length === 0) {
+      next = [value];                                         // từ "tất cả" → chọn 1
+    } else {
+      const idx = current.indexOf(value);
+      next = idx === -1 ? [...current, value]                // thêm vào
+                        : current.filter(v => v !== value);  // bỏ ra
+      if (next.length === 0 || next.length === all.length) next = []; // reset về tất cả
+    }
+    if (isMonth) _filters.months = next;
+    else _filters.shortNames = next;
+    renderSidebar();
+    _onFilterApply();
+  }
+
+  function _onFilterApply() {
+    if (_activeSubTab === 'rate') _renderRateSection();
+    if (_activeSubTab === 'data') _renderSaleOutTable();
+  }
+
+  // ── Shared helpers ───────────────────────────────────────────────────────
+  function _rateBg(r)  { if (r===null) return ''; if (r>=5) return 'bg-red-100'; if (r>=2) return 'bg-amber-100'; if (r>0) return 'bg-green-50'; return ''; }
+  function _rateTxt(r) { if (r===null) return 'text-gray-300'; if (r>=5) return 'text-red-700 font-bold'; if (r>=2) return 'text-amber-700 font-semibold'; if (r>0) return 'text-emerald-700'; return 'text-gray-400'; }
+  function _avg(arr)   { const v = arr.filter(x => x !== null); return v.length ? v.reduce((a,b)=>a+b,0)/v.length : null; }
+
+  function _tableWrap(borderColor, headerBg, label, badge, tableHtml) {
+    return `<div class="bg-white rounded-xl border ${borderColor} shadow-sm overflow-auto mb-4" style="max-height:calc(100vh-220px)">
+      <div class="px-4 py-2 ${headerBg} border-b flex items-center gap-2 flex-shrink-0">
+        <span class="text-xs font-semibold uppercase tracking-wide">${label}</span>
+        ${badge ? `<span class="text-xs opacity-60">${badge}</span>` : ''}
+      </div>
+      ${tableHtml}
+    </div>`;
+  }
+
+  function _thRow(cols, lastLabel, accentBg, accentDark) {
+    return `<thead class="sticky top-0 z-10"><tr class="${accentBg} text-white text-xs">
+      <th class="px-3 py-2 text-left sticky left-0 ${accentBg} z-20 whitespace-nowrap min-w-[100px]">Mã SP</th>
+      <th class="px-3 py-2 text-left min-w-[140px] whitespace-nowrap">Tên SP</th>
+      <th class="px-3 py-2 text-left min-w-[100px] whitespace-nowrap">Tên rút gọn</th>
+      ${cols.map(c=>`<th class="px-3 py-2 text-right whitespace-nowrap">${c}</th>`).join('')}
+      <th class="px-3 py-2 text-right font-bold whitespace-nowrap ${accentDark}">${lastLabel}</th>
+    </tr></thead>`;
+  }
+
+  function _infoTds(info, sn, rowBg) {
+    return `<td class="px-3 py-1.5 text-xs text-gray-600 sticky left-0 ${rowBg} font-mono whitespace-nowrap">${info.model_code||'—'}</td>
+            <td class="px-3 py-1.5 text-xs text-gray-700 whitespace-nowrap max-w-[160px] truncate" title="${info.product_fullname}">${info.product_fullname||'—'}</td>
+            <td class="px-3 py-1.5 text-xs font-medium text-gray-800 whitespace-nowrap">${sn}</td>`;
+  }
+
+  // ── Bộ lọc dùng chung ────────────────────────────────────────────────────
+  function _applyFilters() {
+    let fe = _errorData, fs = _saleoutData;
+    if (_filters.months.length > 0) {
+      const mSet = new Set(_filters.months);
+      fe = fe.filter(r => mSet.has(r.month));
+      fs = fs.filter(r => mSet.has(r.month));
+    }
+    if (_filters.shortNames.length > 0) {
+      const nSet = new Set(_filters.shortNames);
+      fe = fe.filter(r => nSet.has(r.product_shortname));
+      fs = fs.filter(r => nSet.has(r.short_name));
+    }
+    return { fe, fs };
+  }
+
+  // ── Điều phối chính ───────────────────────────────────────────────────────
+  function _renderSaleOutTable() {
+    const container = _el('saleout-table-container');
+    if (!container) return;
+
+    if (_saleoutData.length === 0) {
+      container.innerHTML = `<div class="flex flex-col items-center justify-center py-16 text-gray-400">
+        <svg class="w-12 h-12 mb-3 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 10h18M3 6h18M3 14h18M3 18h18"/>
+        </svg>
+        <p class="text-sm">Chưa có dữ liệu Sale Out</p>
+        <p class="text-xs mt-1 text-gray-300">Nhấn "Import Sale Out" để bắt đầu</p>
+      </div>`;
+      return;
+    }
+
+    const { fe, fs } = _applyFilters();
+
+    // Build shared product list & month list từ filtered saleout
+    const productMap = new Map();
+    for (const r of fs) {
+      if (!productMap.has(r.short_name))
+        productMap.set(r.short_name, { model_code: r.model_code||'', product_fullname: r.product_fullname||'' });
+    }
+    const months   = ErrorRateService.getUniqueMonths(fs);
+    const products = [...productMap.entries()];
+
+    const filterNote = (_filters.months.length || _filters.shortNames.length)
+      ? `<p class="text-xs text-amber-600 mb-2">⚑ Đang lọc: ${[
+          _filters.months.length ? _filters.months.length+' tháng' : '',
+          _filters.shortNames.length ? _filters.shortNames.length+' sản phẩm' : '',
+        ].filter(Boolean).join(', ')}</p>`
+      : '';
+
+    // Thứ tự: Tỷ lệ % → Số lượng lỗi → Sale Out
+    container.innerHTML =
+      filterNote +
+      _tllMatrixHtml(products, months, fs, fe) +
+      _errCountMatrixHtml(products, months, fe) +
+      _saleOutMatrixHtml(products, months, fs);
+  }
+
+  // ── Bảng 1: Tỷ lệ lỗi % (LŨY KẾ) ───────────────────────────────────────
+  function _tllMatrixHtml(products, months, fs, fe) {
+    const saleMap = new Map(fs.map(r => [`${r.short_name}|${r.month}`, Number(r.value)||0]));
+    const errMap  = new Map();
+    for (const r of fe) { const k=`${r.product_shortname}|${r.month}`; errMap.set(k,(errMap.get(k)||0)+1); }
+
+    // Tỷ lệ lỗi LŨY KẾ từ tháng đầu đến tháng có index upToIdx
+    // Nếu tháng hiện tại (upToIdx) không có sale → null (#N/A), không kế thừa tháng trước
+    function cumulRate(sn, upToIdx) {
+      const currentSale = saleMap.get(`${sn}|${months[upToIdx]}`) || 0;
+      if (currentSale === 0) return null;
+      let totalSale = 0, totalErr = 0;
+      for (let i = 0; i <= upToIdx; i++) {
+        const m = months[i];
+        totalSale += saleMap.get(`${sn}|${m}`) || 0;
+        totalErr  += errMap.get(`${sn}|${m}`) || 0;
+      }
+      return totalSale > 0 ? (totalErr / totalSale * 100) : null;
+    }
+
+    // TLL lũy kế toàn bộ sản phẩm đến tháng upToIdx
+    // Nếu không có sản phẩm nào có sale tháng này → null (#N/A)
+    function cumulColRate(upToIdx) {
+      const hasCurrentSale = products.some(([sn]) => (saleMap.get(`${sn}|${months[upToIdx]}`) || 0) > 0);
+      if (!hasCurrentSale) return null;
+      let totalSale = 0, totalErr = 0;
+      for (let i = 0; i <= upToIdx; i++) {
+        const m = months[i];
+        for (const [sn] of products) {
+          totalSale += saleMap.get(`${sn}|${m}`) || 0;
+          totalErr  += errMap.get(`${sn}|${m}`) || 0;
+        }
+      }
+      return totalSale > 0 ? (totalErr / totalSale * 100) : null;
+    }
+
+    const fmtR = r => r===null ? '—' : r.toFixed(2)+'%';
+
+    const thead = _thRow(months, '% lỗi theo model', 'bg-rose-700', 'bg-rose-800');
+    const rows = products.map(([sn,info],ri) => {
+      // Mỗi ô = tỷ lệ lũy kế đến tháng đó
+      const rowRates = months.map((_m, idx) => cumulRate(sn, idx));
+      // Cột cuối = tỷ lệ lũy kế toàn kỳ (= giá trị ô cuối cùng)
+      const rowTotal = cumulRate(sn, months.length - 1);
+      const rowBg    = ri%2===0 ? 'bg-white' : 'bg-gray-50';
+      return `<tr class="${rowBg} hover:bg-rose-50 transition-colors">
+        ${_infoTds(info,sn,rowBg)}
+        ${rowRates.map(r=>`<td class="px-3 py-1.5 text-right text-xs ${_rateBg(r)} ${_rateTxt(r)}">${fmtR(r)}</td>`).join('')}
+        <td class="px-3 py-1.5 text-right text-xs font-bold ${_rateBg(rowTotal)} ${_rateTxt(rowTotal)} border-l border-rose-200">${fmtR(rowTotal)}</td>
+      </tr>`;
+    }).join('');
+
+    // Hàng footer: mỗi ô = TLL lũy kế toàn sản phẩm đến tháng đó
+    const colRates = months.map((_m, idx) => cumulColRate(idx));
+    const grandTotal = cumulColRate(months.length - 1);
+    const footer = `<tfoot><tr class="bg-rose-50 border-t-2 border-rose-300">
+      <td colspan="3" class="px-3 py-2 text-xs font-bold text-rose-800 sticky left-0 bg-rose-50">% lỗi theo tháng (LK)</td>
+      ${colRates.map(r=>`<td class="px-3 py-2 text-right text-xs font-bold ${_rateBg(r)} ${_rateTxt(r)}">${fmtR(r)}</td>`).join('')}
+      <td class="px-3 py-2 text-right text-xs font-bold ${_rateBg(grandTotal)} ${_rateTxt(grandTotal)} bg-rose-100 border-l border-rose-200">${fmtR(grandTotal)}</td>
+    </tr></tfoot>`;
+
+    return _tableWrap('border-rose-200','bg-rose-50',
+      '<span class="text-rose-700">📉 Tỷ lệ lỗi lũy kế (Lỗi ÷ Sale Out)</span>',
+      '— màu: <span class="text-red-600 font-bold">≥5%</span> · <span class="text-amber-600">≥2%</span> · <span class="text-emerald-600">&lt;2%</span>',
+      `<table class="w-full text-sm border-collapse">${thead}<tbody>${rows}</tbody>${footer}</table>`);
+  }
+
+  // ── Bảng 2: Số lượng lỗi ────────────────────────────────────────────────
+  function _errCountMatrixHtml(products, months, fe) {
+    const errMap = new Map();
+    for (const r of fe) { const k=`${r.product_shortname}|${r.month}`; errMap.set(k,(errMap.get(k)||0)+1); }
+    const cnt = (sn,m) => errMap.get(`${sn}|${m}`) || 0;
+
+    // Tìm max để scale màu
+    let maxV = 0;
+    for (const [sn] of products) for (const m of months) maxV = Math.max(maxV, cnt(sn,m));
+
+    const cntBg = v => { if (!v) return ''; const r=v/Math.max(maxV,1); if (r>0.6) return 'bg-orange-200'; if (r>0.3) return 'bg-orange-100'; return 'bg-orange-50'; };
+
+    const thead = _thRow(months, 'Tổng lỗi theo model', 'bg-orange-600', 'bg-orange-700');
+    const rows = products.map(([sn,info],ri) => {
+      let rowTotal = 0;
+      const cells = months.map(m => { const v=cnt(sn,m); rowTotal+=v; return `<td class="px-3 py-1.5 text-right text-xs ${v?cntBg(v):''} ${v?'text-orange-800':'text-gray-300'}">${v||'—'}</td>`; }).join('');
+      const rowBg = ri%2===0 ? 'bg-white' : 'bg-gray-50';
+      return `<tr class="${rowBg} hover:bg-orange-50 transition-colors">
+        ${_infoTds(info,sn,rowBg)}
+        ${cells}
+        <td class="px-3 py-1.5 text-right text-xs font-bold text-orange-700 border-l border-orange-200">${rowTotal||'—'}</td>
+      </tr>`;
+    }).join('');
+    const colTotals = months.map(m => products.reduce((s,[sn])=>s+cnt(sn,m),0));
+    const grandTotal = colTotals.reduce((a,b)=>a+b,0);
+    const footer = `<tfoot><tr class="bg-orange-50 border-t-2 border-orange-300">
+      <td colspan="3" class="px-3 py-2 text-xs font-bold text-orange-800 sticky left-0 bg-orange-50">Tổng lỗi theo tháng</td>
+      ${colTotals.map(v=>`<td class="px-3 py-2 text-right text-xs font-bold text-orange-800">${v||'—'}</td>`).join('')}
+      <td class="px-3 py-2 text-right text-xs font-bold text-orange-900 bg-orange-100 border-l border-orange-200">${grandTotal||'—'}</td>
+    </tr></tfoot>`;
+
+    return _tableWrap('border-orange-200','bg-orange-50',
+      '<span class="text-orange-700">🔢 Số lượng lỗi</span>',
+      '— màu đậm = nhiều lỗi hơn',
+      `<table class="w-full text-sm border-collapse">${thead}<tbody>${rows}</tbody>${footer}</table>`);
+  }
+
+  // ── Bảng 3: Dữ liệu Sale Out ─────────────────────────────────────────────
+  function _saleOutMatrixHtml(products, months, filtered) {
+    const valMap = new Map(filtered.map(r=>[`${r.short_name}|${r.month}`,Number(r.value)||0]));
+    const colTotals = {}; months.forEach(m=>{colTotals[m]=0;}); let grandTotal=0;
+    for (const r of filtered) { colTotals[r.month]=(colTotals[r.month]||0)+(Number(r.value)||0); grandTotal+=Number(r.value)||0; }
+    const fmt = n => n.toLocaleString('vi-VN');
+
+    const thead = _thRow(months, 'Tổng theo model', 'bg-blue-600', 'bg-blue-700');
+    const rows = products.map(([sn,info],ri) => {
+      let rowTotal=0;
+      const cells = months.map(m=>{const v=valMap.get(`${sn}|${m}`)||0;rowTotal+=v;return `<td class="px-3 py-1.5 text-right text-xs text-gray-700">${v?fmt(v):'—'}</td>`;}).join('');
+      const rowBg = ri%2===0 ? 'bg-white' : 'bg-gray-50';
+      return `<tr class="${rowBg} hover:bg-blue-50 transition-colors">
+        ${_infoTds(info,sn,rowBg)}
+        ${cells}
+        <td class="px-3 py-1.5 text-right text-xs font-bold text-blue-700">${fmt(rowTotal)}</td>
+      </tr>`;
+    }).join('');
+    const footer = `<tfoot><tr class="bg-amber-50 border-t-2 border-amber-300">
+      <td colspan="3" class="px-3 py-2 text-xs font-bold text-amber-800 sticky left-0 bg-amber-50">Tổng theo tháng</td>
+      ${months.map(m=>`<td class="px-3 py-2 text-right text-xs font-bold text-amber-800">${fmt(colTotals[m]||0)}</td>`).join('')}
+      <td class="px-3 py-2 text-right text-xs font-bold text-amber-900 bg-amber-100">${fmt(grandTotal)}</td>
+    </tr></tfoot>`;
+
+    return _tableWrap('border-blue-200','bg-blue-50',
+      '<span class="text-blue-700">📦 Dữ liệu Sale Out</span>', '',
+      `<table class="w-full text-sm border-collapse">${thead}<tbody>${rows}</tbody>${footer}</table>`);
+  }
+
+  // ── Error rate tables ────────────────────────────────────────────────────
+  function _renderRateSection() {
+    _renderRateTables();
+    _renderCharts();
+  }
+
+  function _renderRateTables() {
+    const byProduct = ErrorRateService.calcByProduct(_errorData, _saleoutData, _filters);
+    const byMonth   = ErrorRateService.calcByMonth(_errorData, _saleoutData, _filters);
+
+    function _rateColor(rate) {
+      if (rate === null) return 'text-gray-400';
+      if (rate >= 5)  return 'text-red-600 font-bold';
+      if (rate >= 2)  return 'text-amber-600 font-semibold';
+      return 'text-emerald-600';
+    }
+
+    // Table by product
+    const pContainer = _el('rate-by-product-table');
+    if (pContainer) {
+      if (byProduct.length === 0) {
+        pContainer.innerHTML = '<p class="text-xs text-gray-400 italic text-center py-4">Không có dữ liệu</p>';
+      } else {
+        pContainer.innerHTML = `<table class="w-full text-xs border-collapse">
+          <thead class="bg-gray-50 sticky top-0">
+            <tr>
+              <th class="px-2 py-1.5 text-left font-semibold text-gray-500 border-b">Tên rút gọn</th>
+              <th class="px-2 py-1.5 text-right font-semibold text-gray-500 border-b">Lỗi</th>
+              <th class="px-2 py-1.5 text-right font-semibold text-gray-500 border-b">Sale</th>
+              <th class="px-2 py-1.5 text-right font-semibold text-gray-500 border-b">TLL%</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${byProduct.map((row, i) => `
+              <tr class="${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}">
+                <td class="px-2 py-1 text-gray-700 font-medium whitespace-nowrap">${row.short_name}</td>
+                <td class="px-2 py-1 text-right text-gray-600">${row.errors.toLocaleString('vi-VN')}</td>
+                <td class="px-2 py-1 text-right text-gray-600">${row.sale.toLocaleString('vi-VN')}</td>
+                <td class="px-2 py-1 text-right ${_rateColor(row.rate)}">${ErrorRateService.fmtRate(row.rate)}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>`;
+      }
+    }
+
+    // Table by month
+    const mContainer = _el('rate-by-month-table');
+    if (mContainer) {
+      if (byMonth.length === 0) {
+        mContainer.innerHTML = '<p class="text-xs text-gray-400 italic text-center py-4">Không có dữ liệu</p>';
+      } else {
+        mContainer.innerHTML = `<table class="w-full text-xs border-collapse">
+          <thead class="bg-gray-50 sticky top-0">
+            <tr>
+              <th class="px-2 py-1.5 text-left font-semibold text-gray-500 border-b">Tháng</th>
+              <th class="px-2 py-1.5 text-right font-semibold text-gray-500 border-b">Lỗi</th>
+              <th class="px-2 py-1.5 text-right font-semibold text-gray-500 border-b">Sale</th>
+              <th class="px-2 py-1.5 text-right font-semibold text-gray-500 border-b" title="Lũy kế từ tháng đầu đến tháng này">TLL% (LK)</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${byMonth.map((row, i) => `
+              <tr class="${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}">
+                <td class="px-2 py-1 text-gray-700 font-medium">${row.month}</td>
+                <td class="px-2 py-1 text-right text-gray-600">${row.errors.toLocaleString('vi-VN')}</td>
+                <td class="px-2 py-1 text-right text-gray-600">${row.sale.toLocaleString('vi-VN')}</td>
+                <td class="px-2 py-1 text-right ${_rateColor(row.rate)}">${ErrorRateService.fmtRate(row.rate)}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>`;
+      }
+    }
+
+    return { byProduct, byMonth };
+  }
+
+  // ── Charts ───────────────────────────────────────────────────────────────
+  function _renderCharts() {
+    const byProduct = ErrorRateService.calcByProduct(_errorData, _saleoutData, _filters);
+    const byMonth   = ErrorRateService.calcByMonth(_errorData, _saleoutData, _filters);
+
+    if (_chartProduct) { _chartProduct.destroy(); _chartProduct = null; }
+    if (_chartMonth)   { _chartMonth.destroy();   _chartMonth   = null; }
+
+    const ctxP = _el('rate-by-product-chart');
+    const ctxM = _el('rate-by-month-chart');
+
+    const sorted = [...byProduct].sort((a, b) => (b.rate || 0) - (a.rate || 0));
+
+    if (ctxP && sorted.length > 0) {
+      _chartProduct = new Chart(ctxP, {
+        type: 'bar',
+        data: {
+          labels: sorted.map(r => r.short_name),
+          datasets: [{
+            label: 'Tỷ lệ lỗi (%)',
+            data: sorted.map(r => r.rate !== null ? parseFloat(r.rate.toFixed(2)) : 0),
+            backgroundColor: sorted.map((_, i) => COLORS[i % COLORS.length] + 'CC'),
+            borderColor: sorted.map((_, i) => COLORS[i % COLORS.length]),
+            borderWidth: 1,
+          }],
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            datalabels: {
+              anchor: 'end', align: 'end',
+              formatter: v => v.toFixed(2) + '%',
+              font: { size: 10 }, color: '#374151',
+            },
+          },
+          scales: {
+            x: { title: { display: true, text: 'TLL (%)', font: { size: 10 } } },
+          },
+        },
+        plugins: typeof ChartDataLabels !== 'undefined' ? [ChartDataLabels] : [],
+      });
+    }
+
+    if (ctxM && byMonth.length > 0) {
+      _chartMonth = new Chart(ctxM, {
+        type: 'line',
+        data: {
+          labels: byMonth.map(r => r.month),
+          datasets: [{
+            label: 'Tỷ lệ lỗi (%)',
+            data: byMonth.map(r => r.rate !== null ? parseFloat(r.rate.toFixed(2)) : null),
+            borderColor: '#3B82F6',
+            backgroundColor: '#3B82F620',
+            pointBackgroundColor: '#3B82F6',
+            fill: true, tension: 0.3,
+            spanGaps: false,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            datalabels: {
+              formatter: v => v !== null ? v.toFixed(2) + '%' : '',
+              font: { size: 9 }, color: '#1D4ED8',
+              anchor: 'top', align: 'top',
+            },
+          },
+          scales: {
+            y: { title: { display: true, text: 'TLL (%)', font: { size: 10 } }, beginAtZero: true },
+          },
+        },
+        plugins: typeof ChartDataLabels !== 'undefined' ? [ChartDataLabels] : [],
+      });
+    }
+  }
+
+  // ── Public API ───────────────────────────────────────────────────────────
+  function setData(saleoutData, errorData) {
+    _saleoutData = saleoutData || [];
+    _errorData   = errorData   || [];
+    _filters     = { months: [], shortNames: [] };
+  }
+
+  function render() {
+    renderSidebar();
+    if (_activeSubTab === 'data') {
+      _renderSaleOutTable();
+    } else {
+      _renderRateSection();
+    }
+  }
+
+  function init() {
+    _el('subtab-saleout-data')?.addEventListener('click', () => _activateSubTab('data'));
+    _el('subtab-saleout-rate')?.addEventListener('click', () => {
+      _activateSubTab('rate');
+    });
+  }
+
+  return { init, setData, render, renderSidebar };
+})();

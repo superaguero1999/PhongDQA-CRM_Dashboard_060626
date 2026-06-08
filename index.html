@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CRM Dashboard — Tỷ lệ lỗi Online</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="assets/css/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+  <script>
+    // Đăng ký plugin tường minh (tránh trường hợp CDN không tự đăng ký)
+    if (typeof ChartDataLabels !== 'undefined') Chart.register(ChartDataLabels);
+  </script>
+  <style>
+    [x-cloak] { display: none; }
+    .zone-drop { min-height: 36px; transition: background 0.15s; }
+    .field-chip:active { opacity: 0.5; cursor: grabbing; }
+    .pivot-table-wrap table { border-collapse: collapse; }
+    #chart-canvas-wrap { position: relative; height: 320px; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 4px; }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen text-gray-800 font-sans">
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     TOP NAV
+═══════════════════════════════════════════════════════════════════════ -->
+<header class="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between sticky top-0 z-30 shadow-sm">
+  <div class="flex items-center gap-3">
+    <svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+    </svg>
+    <span class="font-semibold text-gray-800 text-lg">CRM Dashboard</span>
+    <span class="text-gray-400 text-sm hidden sm:block">Tỷ lệ lỗi thị trường Online</span>
+  </div>
+
+  <div class="flex items-center gap-3">
+    <!-- Data stats -->
+    <span class="text-xs text-gray-500" id="data-count">— records</span>
+
+    <!-- Role badge -->
+    <span id="role-badge" class="px-2 py-0.5 rounded text-xs font-semibold bg-blue-100 text-blue-700">Viewer</span>
+
+    <!-- Saved views -->
+    <select id="saved-views-select" data-editor-only class="text-sm border border-gray-300 rounded px-2 py-1 focus:outline-none focus:border-blue-500 hidden sm:block">
+      <option value="">— Chọn view —</option>
+    </select>
+
+    <!-- Editor actions -->
+    <div data-editor-only class="flex items-center gap-2" style="display:none">
+      <button id="btn-save-view" class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-100 transition-colors" title="Lưu view hiện tại">💾 Lưu view</button>
+      <button id="btn-delete-view" class="text-xs px-2 py-1 border border-red-200 text-red-600 rounded hover:bg-red-50 transition-colors" title="Xóa view đã chọn">🗑 Xóa</button>
+      <button id="btn-import" class="flex items-center gap-1 text-sm px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+        Import error_Data
+      </button>
+      <button id="btn-sync-views" class="text-xs px-2 py-1 border border-blue-200 text-blue-600 rounded hover:bg-blue-50 transition-colors" title="Đẩy tất cả views lên NocoDB để đồng bộ sang máy khác">☁ Đồng bộ</button>
+      <button id="btn-logout" class="text-xs px-2 py-1 text-gray-500 hover:text-red-600 transition-colors" style="display:none">Thoát Editor</button>
+    </div>
+
+    <!-- Viewer actions -->
+    <div data-viewer-only class="flex items-center gap-2">
+      <button id="btn-editor-login" class="text-xs px-2 py-1 border border-amber-300 text-amber-700 rounded hover:bg-amber-50 transition-colors">🔑 Editor</button>
+    </div>
+
+    <!-- Refresh -->
+    <button id="btn-refresh" class="p-1.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors" title="Tải lại dữ liệu">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- Loading indicator -->
+<div id="data-loading" class="fixed top-0 left-0 right-0 h-1 bg-blue-500 animate-pulse z-50" style="display:none"></div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     MAIN LAYOUT
+═══════════════════════════════════════════════════════════════════════ -->
+<div class="flex h-[calc(100vh-57px)]">
+
+  <!-- ── LEFT SIDEBAR ─────────────────────────────────────────────────── -->
+  <aside class="w-56 flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-hidden">
+
+    <!-- Pivot tab sidebar -->
+    <div id="sidebar-pivot" class="flex flex-col flex-1 overflow-hidden">
+
+      <!-- Editor: Field List -->
+      <div data-editor-only style="display:none" class="flex flex-col flex-1 overflow-hidden">
+        <div class="px-3 py-2 border-b border-gray-100 bg-gray-50">
+          <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Trường dữ liệu</p>
+          <p class="text-xs text-gray-400 mt-0.5">Kéo vào Rows / Cols / Values</p>
+        </div>
+        <div id="pivot-field-list" class="flex flex-col gap-1 p-2 overflow-y-auto flex-1"></div>
+      </div>
+
+      <!-- Viewer: Field toggles -->
+      <div data-viewer-only class="flex flex-col flex-1 overflow-hidden">
+        <div class="px-3 py-2 border-b border-gray-100 bg-gray-50">
+          <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Hiển thị cột</p>
+          <p class="text-xs text-gray-400 mt-0.5">Click để ẩn/hiện cột</p>
+        </div>
+        <div id="viewer-field-toggles" class="flex flex-col gap-2 p-3 overflow-y-auto flex-1 text-sm text-gray-500 italic">
+          Chưa có dữ liệu
+        </div>
+      </div>
+
+    </div><!-- /sidebar-pivot -->
+
+    <!-- Sale Out tab sidebar (filters) -->
+    <div id="sidebar-saleout" class="flex flex-col flex-1 overflow-hidden" style="display:none">
+      <div class="px-3 py-2 border-b border-gray-100 bg-gray-50 flex-shrink-0">
+        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Bộ lọc</p>
+        <p class="text-xs text-gray-400 mt-0.5">Lọc dữ liệu tỷ lệ lỗi</p>
+      </div>
+      <div id="saleout-sidebar-content" class="overflow-y-auto flex-1 p-2 text-xs text-gray-400 italic">
+        Chưa có dữ liệu
+      </div>
+    </div><!-- /sidebar-saleout -->
+
+    <!-- Dashboard tab sidebar (slicers) -->
+    <div id="sidebar-dashboard" class="flex flex-col flex-1 overflow-hidden" style="display:none">
+
+      <!-- Header -->
+      <div class="px-3 py-2 border-b border-gray-100 bg-gray-50 flex items-center justify-between flex-shrink-0">
+        <div>
+          <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Slicer</p>
+          <p class="text-xs text-gray-400 mt-0.5">Bộ lọc nhanh</p>
+        </div>
+        <div class="relative">
+          <button id="btn-add-slicer"
+                  class="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors font-medium">
+            + Thêm
+          </button>
+          <!-- Field picker dropdown -->
+          <div id="add-slicer-dropdown"
+               class="absolute right-0 top-full mt-1 w-52 bg-white border border-gray-200 rounded-lg shadow-xl z-50 overflow-hidden"
+               style="display:none">
+            <p class="text-xs text-gray-500 px-3 py-2 border-b border-gray-100 font-semibold bg-gray-50">
+              Chọn trường dữ liệu
+            </p>
+            <div id="add-slicer-field-list" class="max-h-56 overflow-y-auto"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Slicer list -->
+      <div id="slicer-list" class="overflow-y-auto flex-1 p-2"></div>
+
+    </div><!-- /sidebar-dashboard -->
+
+  </aside>
+
+  <!-- ── MAIN CONTENT ──────────────────────────────────────────────────── -->
+  <main class="flex-1 flex flex-col overflow-hidden">
+
+    <!-- Tab switcher chính — 2 dataset -->
+    <div id="main-tab-bar" class="bg-white border-b border-gray-200 flex items-center px-4 gap-1 flex-shrink-0">
+      <button id="tab-saleout"
+              class="text-sm font-medium px-4 py-2.5 border-b-2 border-blue-600 text-blue-600 transition-colors -mb-px">
+        📉 Tỷ lệ lỗi SPM - thiết kế mới
+      </button>
+      <button id="tab-spm2"
+              class="text-sm font-medium px-4 py-2.5 border-b-2 border-transparent text-gray-500 hover:text-gray-700 transition-colors -mb-px">
+        📋 Tỷ lệ lỗi SPM - ghi nhận tất cả lỗi linh kiện
+      </button>
+      <button id="tab-pivot"     style="display:none" class="text-sm font-medium px-4 py-2.5 border-b-2 border-transparent text-gray-500 hover:text-gray-700 transition-colors -mb-px">📊 Phân tích</button>
+      <button id="tab-dashboard" style="display:none" class="text-sm font-medium px-4 py-2.5 border-b-2 border-transparent text-gray-500 hover:text-gray-700 transition-colors -mb-px">📈 Biểu đồ chi tiết lỗi</button>
+    </div>
+
+    <!-- Sub-tab bar cố định (luôn hiển thị, 4 tab nhỏ) -->
+    <div id="sub-tab-bar" class="bg-white border-b border-gray-200 flex items-center px-4 gap-1 flex-shrink-0 justify-between">
+      <div class="flex gap-1">
+        <button id="subtab-saleout-rate"
+                class="text-sm font-medium px-4 py-2.5 border-b-2 border-blue-600 text-blue-600 transition-colors -mb-px">
+          📉 Tỷ lệ lỗi (TLL)
+</button>
+        <button id="subtab-saleout-data"
+                class="text-sm font-medium px-4 py-2.5 border-b-2 border-transparent text-gray-500 hover:text-gray-700 transition-colors -mb-px">
+          📦 Dữ liệu chi tiết
+        </button>
+        <button id="subtab-pivot" data-editor-only
+                class="text-sm font-medium px-4 py-2.5 border-b-2 border-transparent text-gray-500 hover:text-gray-700 transition-colors -mb-px">
+          📊 Phân tích
+        </button>
+        <button id="subtab-dashboard"
+                class="text-sm font-medium px-4 py-2.5 border-b-2 border-transparent text-gray-500 hover:text-gray-700 transition-colors -mb-px">
+          📈 Biểu đồ chi tiết lỗi
+        </button>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="btn-export-excel"
+                class="flex items-center gap-1 text-sm px-3 py-1.5 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          Xuất Excel
+        </button>
+        <div data-editor-only style="display:none">
+          <button id="btn-import-saleout"
+                  class="flex items-center gap-1 text-sm px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+            Import Sale Out
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pivot section -->
+    <div id="pivot-section" class="flex flex-col flex-1 overflow-hidden">
+
+    <!-- Editor: Pivot config panel -->
+    <div data-editor-only style="display:none" class="bg-white border-b border-gray-200 px-4 py-3">
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+
+        <!-- Rows zone -->
+        <div>
+          <p class="text-xs font-semibold text-gray-500 uppercase mb-1">📋 Rows (Hàng)</p>
+          <div id="pivot-zone-rows" class="zone-drop flex flex-wrap gap-1 p-2 rounded-lg border-2 border-dashed border-gray-200 min-h-9 bg-gray-50 hover:border-blue-300 transition-colors">
+            <span class="text-xs text-gray-400 italic">Kéo trường vào đây...</span>
+          </div>
+        </div>
+
+        <!-- Cols zone -->
+        <div>
+          <p class="text-xs font-semibold text-gray-500 uppercase mb-1">📊 Columns (Cột)</p>
+          <div id="pivot-zone-cols" class="zone-drop flex flex-wrap gap-1 p-2 rounded-lg border-2 border-dashed border-gray-200 min-h-9 bg-gray-50 hover:border-blue-300 transition-colors">
+            <span class="text-xs text-gray-400 italic">Kéo trường vào đây...</span>
+          </div>
+        </div>
+
+        <!-- Values zone -->
+        <div>
+          <p class="text-xs font-semibold text-gray-500 uppercase mb-1">🔢 Values (Giá trị)</p>
+          <div id="pivot-zone-values" class="zone-drop flex flex-wrap gap-1 p-2 rounded-lg border-2 border-dashed border-green-200 min-h-9 bg-green-50 hover:border-green-400 transition-colors">
+            <span class="text-xs text-gray-400 italic">Kéo trường số vào đây...</span>
+          </div>
+        </div>
+
+        <!-- Filters zone -->
+        <div>
+          <p class="text-xs font-semibold text-gray-500 uppercase mb-1">🔍 Filters (Lọc)</p>
+          <div id="pivot-zone-filters" class="zone-drop flex flex-wrap gap-1 p-2 rounded-lg border-2 border-dashed border-purple-200 min-h-9 bg-purple-50 hover:border-purple-400 transition-colors">
+            <span class="text-xs text-gray-400 italic">Kéo trường vào đây để lọc...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chart type + download toolbar -->
+    <div class="bg-white border-b border-gray-100 px-4 py-2 flex items-center gap-2 flex-wrap">
+      <span class="text-xs text-gray-500 font-semibold uppercase">Biểu đồ:</span>
+      <div class="flex gap-1">
+        <button data-chart-type="bar"      class="chart-type-btn text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-100 bg-blue-600 text-white transition-colors">Bar</button>
+        <button data-chart-type="line"     class="chart-type-btn text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-100 transition-colors">Line</button>
+        <button data-chart-type="area"     class="chart-type-btn text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-100 transition-colors">Area</button>
+        <button data-chart-type="pie"      class="chart-type-btn text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-100 transition-colors">Pie</button>
+        <button data-chart-type="doughnut" class="chart-type-btn text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-100 transition-colors">Donut</button>
+      </div>
+      <div class="w-px h-4 bg-gray-200 mx-1"></div>
+      <span class="text-xs text-gray-500 font-semibold uppercase">Sắp xếp:</span>
+      <select id="chart-sort-select" class="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:border-blue-400 text-gray-600 bg-white">
+        <option value="none">Mặc định</option>
+        <option value="value-desc">↓ Giá trị cao → thấp</option>
+        <option value="value-asc">↑ Giá trị thấp → cao</option>
+        <option value="label-asc">A → Z</option>
+        <option value="label-desc">Z → A</option>
+      </select>
+      <div class="flex-1"></div>
+      <button id="btn-download-chart" class="text-xs px-2 py-1 border border-gray-200 rounded hover:bg-gray-100 text-gray-600 transition-colors">⬇ Tải biểu đồ</button>
+    </div>
+
+    <!-- Content: Chart + Pivot table (scrollable) -->
+    <div class="flex-1 overflow-y-auto p-4 space-y-4">
+
+      <!-- Chart -->
+      <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+        <div id="chart-canvas-wrap" class="relative h-72">
+          <canvas id="chart-canvas"></canvas>
+        </div>
+      </div>
+
+      <!-- Pivot Table -->
+      <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+        <h2 class="text-sm font-semibold text-gray-600 mb-3 uppercase tracking-wide">Pivot Table</h2>
+        <div id="pivot-table-container" class="pivot-table-wrap">
+          <div class="flex flex-col items-center justify-center py-16 text-gray-400">
+            <svg class="w-12 h-12 mb-3 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 10h18M3 6h18M3 14h18M3 18h18"/>
+            </svg>
+            <p class="text-sm">Kéo các trường vào Rows, Columns và Values để tạo bảng</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div><!-- /pivot-section -->
+
+    <!-- Sale Out & TLL section -->
+    <div id="saleout-section" class="flex flex-col flex-1 overflow-hidden" style="display:none">
+
+      <!-- Sub-tab: Dữ liệu Sale Out -->
+      <div id="saleout-data-subsection" class="flex-1 overflow-y-auto p-4" style="display:none">
+        <div id="saleout-table-container">
+          <div class="flex flex-col items-center justify-center py-16 text-gray-400">
+            <svg class="w-12 h-12 mb-3 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 10h18M3 6h18M3 14h18M3 18h18"/>
+            </svg>
+            <p class="text-sm">Chưa có dữ liệu Sale Out</p>
+            <p class="text-xs mt-1 text-gray-300">Nhấn "Import Sale Out" để bắt đầu</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Sub-tab: Tỷ lệ lỗi -->
+      <div id="saleout-rate-subsection" class="flex-1 overflow-y-auto p-4 space-y-4">
+        <!-- Tables -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+            <div class="flex items-center justify-between mb-3 gap-2 flex-wrap">
+              <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">TLL theo sản phẩm</h3>
+              <div class="flex items-center gap-2">
+                <select id="table-product-order"
+                        class="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:border-blue-400 bg-white text-gray-600">
+                  <option value="desc">% cao nhất</option>
+                  <option value="asc">% thấp nhất</option>
+                </select>
+                <select id="table-product-topn"
+                        class="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:border-blue-400 bg-white text-gray-600">
+                  <option value="20" selected>Top 20</option>
+                  <option value="10">Top 10</option>
+                  <option value="5">Top 5</option>
+                  <option value="50">Top 50</option>
+                  <option value="0">Tất cả</option>
+                </select>
+              </div>
+            </div>
+            <div id="rate-by-product-table" class="overflow-auto max-h-64"></div>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+            <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">TLL theo tháng</h3>
+            <div id="rate-by-month-table" class="overflow-auto max-h-64"></div>
+          </div>
+        </div>
+        <!-- Charts -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+            <div class="flex items-center justify-between mb-3 gap-2 flex-wrap">
+              <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Biểu đồ TLL theo sản phẩm</h3>
+              <div class="flex items-center gap-2">
+                <select id="chart-product-order"
+                        class="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:border-blue-400 bg-white text-gray-600">
+                  <option value="desc">% cao nhất</option>
+                  <option value="asc">% thấp nhất</option>
+                </select>
+                <select id="chart-product-topn"
+                        class="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:border-blue-400 bg-white text-gray-600">
+                  <option value="20" selected>Top 20</option>
+                  <option value="10">Top 10</option>
+                  <option value="5">Top 5</option>
+                  <option value="50">Top 50</option>
+                  <option value="0">Tất cả</option>
+                </select>
+                <button id="btn-download-product-chart" class="text-xs px-2 py-1 border border-gray-200 rounded hover:bg-gray-100 text-gray-600 transition-colors" title="Tải biểu đồ dạng ảnh">⬇ Tải ảnh</button>
+              </div>
+            </div>
+            <div id="rate-by-product-chart-wrap" class="relative" style="height:400px">
+              <canvas id="rate-by-product-chart"></canvas>
+            </div>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Biểu đồ TLL theo tháng</h3>
+              <button id="btn-download-month-chart" class="text-xs px-2 py-1 border border-gray-200 rounded hover:bg-gray-100 text-gray-600 transition-colors" title="Tải biểu đồ dạng ảnh">⬇ Tải ảnh</button>
+            </div>
+            <div id="rate-by-month-chart-wrap" class="relative h-72">
+              <canvas id="rate-by-month-chart"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /saleout-section -->
+
+    <!-- Dashboard: tất cả các view đã lưu hiển thị dạng lưới biểu đồ -->
+    <div id="dashboard-section" class="flex-1 overflow-y-auto p-4" style="display:none">
+      <div id="dashboard-container" class="grid grid-cols-1 lg:grid-cols-2 gap-4 auto-rows-min"></div>
+    </div>
+
+  </main>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     IMPORT MODAL
+═══════════════════════════════════════════════════════════════════════ -->
+<div id="import-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[90vh]">
+
+    <!-- Modal header -->
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+      <h2 class="text-lg font-semibold text-gray-800">Import dữ liệu từ Excel</h2>
+      <button id="import-close-btn" class="p-1 text-gray-400 hover:text-gray-600 rounded">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <!-- Step indicator -->
+    <div class="flex items-center justify-center gap-2 px-6 py-3 border-b border-gray-100">
+      <div class="flex items-center gap-2">
+        <div id="step-dot-1" class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-blue-600 text-white ring-4 ring-blue-200">1</div>
+        <div class="h-0.5 w-8 bg-gray-200"></div>
+        <div id="step-dot-2" class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-gray-200 text-gray-500">2</div>
+        <div class="h-0.5 w-8 bg-gray-200"></div>
+        <div id="step-dot-3" class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-gray-200 text-gray-500">3</div>
+        <div class="h-0.5 w-8 bg-gray-200"></div>
+        <div id="step-dot-4" class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-gray-200 text-gray-500">4</div>
+        <div class="h-0.5 w-8 bg-gray-200"></div>
+        <div id="step-dot-5" class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-gray-200 text-gray-500">5</div>
+      </div>
+      <div class="ml-3 text-xs text-gray-400 hidden sm:block">Upload → Sheet → Mapping → Preview → Import</div>
+    </div>
+
+    <!-- Modal body (scrollable) -->
+    <div class="flex-1 overflow-y-auto px-6 py-4">
+
+      <!-- Step 1: Upload -->
+      <div id="import-step-1">
+        <p class="text-sm text-gray-600 mb-4">Chọn file Excel (.xlsx) chứa dữ liệu tỷ lệ lỗi cần import.</p>
+        <div id="import-dropzone"
+             class="border-2 border-dashed border-gray-300 rounded-xl p-10 text-center cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition-colors">
+          <svg class="w-12 h-12 mx-auto text-gray-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+          </svg>
+          <p class="text-gray-500 font-medium">Kéo thả file vào đây hoặc click để chọn</p>
+          <p class="text-xs text-gray-400 mt-1">Hỗ trợ .xlsx, .xls</p>
+          <p id="import-file-name" class="mt-3 text-sm font-medium text-blue-600"></p>
+        </div>
+        <input id="import-file-input" type="file" accept=".xlsx,.xls" class="hidden">
+      </div>
+
+      <!-- Step 2: Sheet select -->
+      <div id="import-step-2" style="display:none">
+        <p class="text-sm text-gray-600 mb-3">Chọn sheet chứa dữ liệu cần import:</p>
+        <div id="sheet-list" class="flex flex-col gap-2"></div>
+      </div>
+
+      <!-- Step 3: Field mapping -->
+      <div id="import-step-3" style="display:none">
+        <p class="text-sm text-gray-600 mb-3">Hệ thống đã tự động nhận dạng các trường. Kiểm tra và điều chỉnh nếu cần:</p>
+        <div class="overflow-auto max-h-80 rounded-lg border border-gray-200">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50 sticky top-0">
+              <tr>
+                <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500 border-b">Trường hệ thống</th>
+                <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500 border-b">Cột Excel tương ứng</th>
+              </tr>
+            </thead>
+            <tbody id="mapping-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Step 4: Preview -->
+      <div id="import-step-4" style="display:none">
+        <p class="text-sm text-gray-600 mb-1">Xem trước dữ liệu (10 dòng đầu):</p>
+        <p id="preview-stats" class="text-xs text-blue-600 font-medium mb-3"></p>
+        <div class="overflow-auto max-h-72 rounded-lg border border-gray-200">
+          <table id="preview-table" class="w-full text-sm border-collapse"></table>
+        </div>
+      </div>
+
+      <!-- Step 5: Import progress -->
+      <div id="import-step-5" style="display:none">
+        <p class="text-sm text-gray-600 mb-3">Đang import dữ liệu...</p>
+        <!-- Duplicate summary -->
+        <div id="import-duplicate-summary" style="display:none;margin-bottom:12px;padding:10px 12px;background:#fffbeb;border:1px solid #f59e0b;border-radius:8px">
+          <p id="import-dup-count" style="font-size:13px;font-weight:600;color:#92400e;margin-bottom:4px"></p>
+          <div id="import-dup-list" style="max-height:80px;overflow-y:auto;line-height:1.8"></div>
+        </div>
+        <div class="rounded-full bg-gray-200 h-3 overflow-hidden mb-2">
+          <div id="import-progress-bar" class="h-full bg-blue-500 transition-all duration-300 rounded-full" style="width:0%"></div>
+        </div>
+        <p id="import-progress-text" class="text-sm text-gray-500 text-center"></p>
+        <button id="import-done-btn" class="mt-4 w-full py-2 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition-colors" style="display:none">
+          ✓ Hoàn tất — Đóng
+        </button>
+      </div>
+
+    </div>
+
+    <!-- Modal footer with nav buttons -->
+    <div class="border-t border-gray-100 px-6 py-3 flex justify-between">
+      <div>
+        <button id="import-step2-back" class="text-sm px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors" style="display:none">← Quay lại</button>
+        <button id="import-step3-back" class="text-sm px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors" style="display:none">← Quay lại</button>
+        <button id="import-step4-back" class="text-sm px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors" style="display:none">← Quay lại</button>
+      </div>
+      <div class="flex gap-2">
+        <button id="import-step1-next" disabled class="text-sm px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">Tiếp theo →</button>
+        <button id="import-step2-next" class="text-sm px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors" style="display:none">Tiếp theo →</button>
+        <button id="import-step3-next" class="text-sm px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors" style="display:none">Xem trước →</button>
+        <button id="import-step4-next" class="text-sm px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors" style="display:none">🚀 Bắt đầu Import</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     DRILLDOWN MODAL
+═══════════════════════════════════════════════════════════════════════ -->
+<div id="drilldown-modal" style="display:none" class="fixed inset-0 z-50 flex items-center justify-center p-4">
+  <!-- Backdrop -->
+  <div id="drilldown-backdrop" class="absolute inset-0 bg-black/50 backdrop-blur-sm"></div>
+  <!-- Card -->
+  <div class="relative bg-white rounded-2xl shadow-2xl flex flex-col w-full max-w-6xl" style="max-height:90vh">
+    <!-- Header -->
+    <div class="flex items-start justify-between px-6 py-4 border-b border-gray-100 flex-shrink-0">
+      <div>
+        <h3 id="drilldown-title" class="text-base font-semibold text-gray-800 leading-tight"></h3>
+        <span id="drilldown-count" class="text-xs text-gray-500 mt-0.5 block"></span>
+      </div>
+      <button id="drilldown-close" class="ml-4 p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-400 hover:text-gray-600 flex-shrink-0">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+    <!-- Table -->
+    <div id="drilldown-table-wrap" class="overflow-auto flex-1 rounded-b-2xl"></div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     SALE OUT IMPORT MODAL
+═══════════════════════════════════════════════════════════════════════ -->
+<div id="saleout-import-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[90vh]">
+
+    <!-- Header -->
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+      <h2 class="text-lg font-semibold text-gray-800">Import dữ liệu Sale Out</h2>
+      <button id="saleout-import-close-btn" class="p-1 text-gray-400 hover:text-gray-600 rounded">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <!-- Step indicator -->
+    <div class="flex items-center justify-center gap-2 px-6 py-3 border-b border-gray-100">
+      <div class="flex items-center gap-2">
+        <div id="so-step-dot-1" class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-blue-600 text-white ring-4 ring-blue-200">1</div>
+        <div class="h-0.5 w-12 bg-gray-200"></div>
+        <div id="so-step-dot-2" class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-gray-200 text-gray-500">2</div>
+        <div class="h-0.5 w-12 bg-gray-200"></div>
+        <div id="so-step-dot-3" class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-gray-200 text-gray-500">3</div>
+      </div>
+      <div class="ml-3 text-xs text-gray-400 hidden sm:block">Upload → Xem trước → Import</div>
+    </div>
+
+    <!-- Body -->
+    <div class="flex-1 overflow-y-auto px-6 py-4">
+
+      <!-- Step 1: Upload + sheet -->
+      <div id="so-import-step-1">
+        <p class="text-sm text-gray-600 mb-4">Chọn file Excel chứa dữ liệu Sale Out (hàng = sản phẩm, cột = tháng dạng <code class="bg-gray-100 px-1 rounded">Jan/25</code>).</p>
+        <div id="so-import-dropzone"
+             class="border-2 border-dashed border-gray-300 rounded-xl p-10 text-center cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition-colors">
+          <svg class="w-12 h-12 mx-auto text-gray-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+          </svg>
+          <p class="text-gray-500 font-medium">Kéo thả file vào đây hoặc click để chọn</p>
+          <p class="text-xs text-gray-400 mt-1">Hỗ trợ .xlsx, .xls</p>
+          <p id="so-import-file-name" class="mt-3 text-sm font-medium text-blue-600"></p>
+        </div>
+        <input id="so-import-file-input" type="file" accept=".xlsx,.xls" class="hidden">
+        <div id="so-sheet-list" class="mt-4" style="display:none">
+          <p class="text-sm font-medium text-gray-700 mb-2">Chọn sheet chứa dữ liệu:</p>
+          <div id="so-sheet-list-items" class="flex flex-col gap-2"></div>
+        </div>
+      </div>
+
+      <!-- Step 2: Preview -->
+      <div id="so-import-step-2" style="display:none">
+        <div id="so-preview-stats" class="mb-3"></div>
+        <div class="overflow-auto max-h-72 rounded-lg border border-gray-200">
+          <table id="so-preview-table" class="w-full text-xs border-collapse"></table>
+        </div>
+      </div>
+
+      <!-- Step 3: Import progress -->
+      <div id="so-import-step-3" style="display:none">
+        <p class="text-sm text-gray-600 mb-4">Đang import dữ liệu Sale Out...</p>
+        <div class="rounded-full bg-gray-200 h-3 overflow-hidden mb-2">
+          <div id="so-import-progress-bar" class="h-full bg-emerald-500 transition-all duration-300 rounded-full" style="width:0%"></div>
+        </div>
+        <p id="so-import-progress-text" class="text-sm text-gray-500 text-center"></p>
+        <button id="so-import-done-btn"
+                class="mt-4 w-full py-2 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition-colors"
+                style="display:none">
+          ✓ Hoàn tất — Đóng
+        </button>
+      </div>
+
+    </div>
+
+    <!-- Footer -->
+    <div class="border-t border-gray-100 px-6 py-3 flex justify-between items-center">
+      <button id="so-import-step1-back"
+              class="text-sm px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+              style="display:none">← Quay lại</button>
+      <div class="flex gap-2 ml-auto">
+        <button id="so-import-next-btn"
+                class="text-sm px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled>
+          Tiếp theo →
+        </button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     SCRIPTS
+═══════════════════════════════════════════════════════════════════════ -->
+<script src="assets/js/config/appConfig.js"></script>
+<script src="assets/js/services/authService.js"></script>
+<script src="assets/js/services/storageService.js"></script>
+<script src="assets/js/services/dataService.js"></script>
+<script src="assets/js/services/slicerService.js"></script>
+<script src="assets/js/services/excelService.js"></script>
+<script src="assets/js/ui/pivotEngine.js"></script>
+<script src="assets/js/ui/pivotBuilder.js"></script>
+<script src="assets/js/ui/tableRenderer.js"></script>
+<script src="assets/js/ui/chartRenderer.js"></script>
+<script src="assets/js/ui/importWizard.js"></script>
+<script src="assets/js/ui/dashboardRenderer.js"></script>
+<script src="assets/js/services/saleOutService.js"></script>
+<script src="assets/js/services/errorRateService.js"></script>
+<script src="assets/js/ui/saleOutImport.js"></script>
+<script src="assets/js/ui/saleOutRenderer.js"></script>
+<script src="assets/js/services/exportService.js"></script>
+<script src="assets/js/main.js"></script>
+
+</body>
+</html>

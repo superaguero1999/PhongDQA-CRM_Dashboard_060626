@@ -1,0 +1,39 @@
+/* Extra styles — Tailwind handles most */
+
+/* Smooth drag feedback */
+.field-chip[draggable]:hover { transform: translateY(-1px); box-shadow: 0 2px 8px rgba(59,130,246,0.2); }
+.zone-drop.drag-over { background-color: #EFF6FF; border-color: #3B82F6; }
+
+/* Sticky table column */
+.pivot-table-wrap table th:first-child,
+.pivot-table-wrap table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 5;
+}
+
+/* Scrollbar styling — chung */
+.overflow-auto::-webkit-scrollbar,
+.overflow-y-auto::-webkit-scrollbar { width: 5px; height: 5px; }
+.overflow-auto::-webkit-scrollbar-thumb,
+.overflow-y-auto::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+
+/* Scrollbar lớn hơn cho bảng drilldown */
+#drilldown-table-wrap::-webkit-scrollbar        { width: 12px; height: 12px; }
+#drilldown-table-wrap::-webkit-scrollbar-track  { background: #F1F5F9; border-radius: 6px; }
+#drilldown-table-wrap::-webkit-scrollbar-thumb  {
+  background: #94A3B8;
+  border-radius: 6px;
+  border: 2px solid #F1F5F9;
+}
+#drilldown-table-wrap::-webkit-scrollbar-thumb:hover  { background: #64748B; }
+#drilldown-table-wrap::-webkit-scrollbar-corner { background: #F1F5F9; }
+
+/* Chart container min height */
+#chart-canvas-wrap canvas { max-height: 320px; }
+
+/* Mobile tweaks */
+@media (max-width: 640px) {
+  aside { width: 0; overflow: hidden; }
+  #import-modal .max-w-2xl { max-width: 95vw; }
+}

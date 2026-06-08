@@ -1,0 +1,347 @@
+const SaleOutImport = (() => {
+  // Nhận diện cả 2 format: Y2501 (mới) và Jan/25 (cũ)
+  const MONTH_PATTERN = /^Y\d{4}$|^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\/\d{2}$/i;
+  const SKIP_ROW_PATTERNS = [/^tổng/i, /^total/i, /^grand/i, /^sum/i];
+
+  let _workbook = null;
+  let _parsedRecords = [];
+  let _onComplete = null;
+  let _currentStep = 1;
+
+  const MONTH_NAMES_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  // Chuyển cell value → chuỗi chuẩn để nhận diện tháng
+  // Hỗ trợ 3 dạng Excel lưu:
+  //   Date object  → "Jan/25"   (ô ngày được đọc qua cellDates:true)
+  //   Number 2501  → "Y2501"    (ô text YYmm lưu dạng số)
+  //   Text "Y2501" → "Y2501"    (ô text thông thường)
+  function _cellStr(c) {
+    if (c instanceof Date) {
+      return `${MONTH_NAMES_SHORT[c.getMonth()]}/${String(c.getFullYear()).slice(2)}`;
+    }
+    if (typeof c === 'number' && Number.isFinite(c)) {
+      const s = String(Math.round(c));
+      // Dạng YYmm: 4 chữ số, 2 số cuối là tháng 01-12
+      if (/^\d{4}$/.test(s)) {
+        const mm = parseInt(s.slice(2), 10);
+        if (mm >= 1 && mm <= 12) return 'Y' + s;
+      }
+    }
+    return String(c || '').trim();
+  }
+
+  // Chuẩn hoá tháng về "Y2501":
+  //   "Y2501"  → giữ nguyên (đã đúng format)
+  //   "Jan/25" → chuyển thành "Y2501" (tương thích file cũ)
+  function _toYYMM(monthStr) {
+    if (/^Y\d{4}$/.test(monthStr)) return monthStr;
+    const parts = monthStr.split('/');
+    if (parts.length !== 2) return monthStr;
+    const idx = MONTH_NAMES_SHORT.indexOf(parts[0]);
+    if (idx < 0) return monthStr;
+    return `Y${parts[1]}${String(idx + 1).padStart(2, '0')}`;
+  }
+
+  // ── Bước 1: Parse file Excel ─────────────────────────────────────────────
+  function _parseFile(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = e => {
+        try {
+          // cellDates: true → XLSX trả Date object thay vì serial number cho ô ngày tháng
+          _workbook = XLSX.read(e.target.result, { type: 'array', cellDates: true });
+          resolve(_workbook.SheetNames);
+        } catch (err) {
+          reject(err);
+        }
+      };
+      reader.onerror = () => reject(new Error('Không đọc được file'));
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  // ── Bước 2: Parse sheet thành flat records ───────────────────────────────
+  function _parseSheet(sheetName) {
+    const sheet = _workbook.Sheets[sheetName];
+    const raw = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+
+    // Tìm hàng header: hàng có >= 3 cột khớp pattern tháng MMM/YY
+    // Dùng _cellStr để xử lý cả trường hợp Excel lưu Date object
+    let headerRowIdx = -1;
+    for (let r = 0; r < Math.min(15, raw.length); r++) {
+      const monthCount = raw[r].filter(c => MONTH_PATTERN.test(_cellStr(c))).length;
+      if (monthCount >= 3) { headerRowIdx = r; break; }
+    }
+    if (headerRowIdx < 0) throw new Error('Không tìm thấy hàng header có cột tháng (VD: Jan/25, Feb/25...)');
+
+    const headerRow = raw[headerRowIdx].map(c => _cellStr(c));
+
+    // Xác định cột
+    let shortNameCol = -1, modelCodeCol = -1, productNameCol = -1;
+    const monthCols = [];
+
+    function normalize(s) {
+      return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim();
+    }
+
+    headerRow.forEach((h, i) => {
+      const n = normalize(h);
+      if (n.includes('ten rut gon') || n.includes('short')) shortNameCol = i;
+      else if (n.includes('ma sp') || n.includes('model code') || n.includes('ma san pham')) modelCodeCol = i;
+      else if ((n.includes('ten sp') || n.includes('ten san pham')) && !n.includes('rut gon')) productNameCol = i;
+      if (MONTH_PATTERN.test(h)) monthCols.push({ month: h, idx: i });
+    });
+
+    if (shortNameCol < 0) throw new Error('Không tìm thấy cột "Tên rút gọn" trong header');
+    if (monthCols.length === 0) throw new Error('Không tìm thấy cột tháng hợp lệ');
+
+    const records = [];
+    for (let r = headerRowIdx + 1; r < raw.length; r++) {
+      const row = raw[r];
+      const shortName = String(row[shortNameCol] || '').trim();
+      if (!shortName) continue;
+      if (SKIP_ROW_PATTERNS.some(p => p.test(shortName))) continue;
+
+      const modelCode   = modelCodeCol   >= 0 ? String(row[modelCodeCol]   || '').trim() : '';
+      const productName = productNameCol >= 0 ? String(row[productNameCol] || '').trim() : '';
+
+      for (const { month, idx } of monthCols) {
+        const raw_val = row[idx];
+        const value = (raw_val === '' || raw_val === null || raw_val === undefined) ? 0 : Number(raw_val);
+        records.push({
+          short_name: shortName,
+          model_code: modelCode,
+          product_fullname: productName,
+          month: _toYYMM(month),   // "Jan/25" → "Y2501" khớp field month của error list
+          value: isNaN(value) ? 0 : value,
+        });
+      }
+    }
+    return records;
+  }
+
+  // ── UI helpers ──────────────────────────────────────────────────────────
+  function _el(id) { return document.getElementById(id); }
+
+  function _goToStep(step) {
+    _currentStep = step;
+    [1, 2, 3].forEach(s => {
+      const el = _el(`so-import-step-${s}`);
+      if (el) el.style.display = s === step ? '' : 'none';
+      const dot = _el(`so-step-dot-${s}`);
+      if (dot) {
+        dot.className = `w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold ${
+          s < step ? 'bg-blue-600 text-white' :
+          s === step ? 'bg-blue-600 text-white ring-4 ring-blue-200' :
+          'bg-gray-200 text-gray-500'
+        }`;
+      }
+    });
+    const backBtn = _el('so-import-step1-back');
+    if (backBtn) backBtn.style.display = step > 1 && step < 3 ? '' : 'none';
+    const nextBtn = _el('so-import-next-btn');
+    if (nextBtn) {
+      if (step === 1) { nextBtn.style.display = ''; nextBtn.textContent = 'Tiếp theo →'; nextBtn.disabled = true; }
+      if (step === 2) { nextBtn.style.display = ''; nextBtn.textContent = '🚀 Bắt đầu Import'; nextBtn.disabled = false; }
+      if (step === 3) { nextBtn.style.display = 'none'; }
+    }
+  }
+
+  function _renderPreview() {
+    const stats = _el('so-preview-stats');
+    const products = [...new Set(_parsedRecords.map(r => r.short_name))];
+    const months = ErrorRateService.sortMonths([...new Set(_parsedRecords.map(r => r.month))]);
+    if (stats) {
+      stats.innerHTML = `
+        <div class="flex gap-4 flex-wrap">
+          <span class="inline-flex items-center gap-1 px-3 py-1 bg-blue-50 text-blue-700 rounded-full text-xs font-medium">
+            📦 ${products.length} sản phẩm
+          </span>
+          <span class="inline-flex items-center gap-1 px-3 py-1 bg-emerald-50 text-emerald-700 rounded-full text-xs font-medium">
+            📅 ${months.length} tháng (${months[0]} → ${months[months.length - 1]})
+          </span>
+          <span class="inline-flex items-center gap-1 px-3 py-1 bg-gray-100 text-gray-600 rounded-full text-xs font-medium">
+            📊 ${_parsedRecords.length} dòng dữ liệu
+          </span>
+          <span class="inline-flex items-center gap-1 px-3 py-1 bg-amber-50 text-amber-700 rounded-full text-xs font-medium">
+            🔑 Format tháng: Y2501
+          </span>
+        </div>`;
+    }
+
+    // Hiển thị sample dạng matrix (tối đa 5 sản phẩm × 6 tháng)
+    const previewProducts = products.slice(0, 5);
+    const previewMonths = months.slice(0, 6);
+    const valMap = new Map();
+    for (const r of _parsedRecords) valMap.set(`${r.short_name}|${r.month}`, r.value);
+
+    const tbl = _el('so-preview-table');
+    if (!tbl) return;
+    const ths = ['Tên rút gọn', ...previewMonths, months.length > 6 ? '...' : ''].filter(Boolean);
+    tbl.innerHTML = `
+      <thead class="bg-gray-50 sticky top-0">
+        <tr>${ths.map(h => `<th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 border-b whitespace-nowrap">${h}</th>`).join('')}</tr>
+      </thead>
+      <tbody>
+        ${previewProducts.map((p, ri) => `
+          <tr class="${ri % 2 === 0 ? 'bg-white' : 'bg-gray-50'}">
+            <td class="px-3 py-1.5 font-medium text-gray-700 text-xs whitespace-nowrap">${p}</td>
+            ${previewMonths.map(m => {
+              const v = valMap.get(`${p}|${m}`) || 0;
+              return `<td class="px-3 py-1.5 text-right text-xs text-gray-600">${v.toLocaleString('vi-VN')}</td>`;
+            }).join('')}
+            ${months.length > 6 ? '<td class="px-3 py-1.5 text-xs text-gray-400">...</td>' : ''}
+          </tr>`).join('')}
+        ${products.length > 5 ? `<tr><td colspan="${ths.length}" class="px-3 py-2 text-xs text-gray-400 italic">... và ${products.length - 5} sản phẩm khác</td></tr>` : ''}
+      </tbody>`;
+  }
+
+  async function _doImport() {
+    const bar = _el('so-import-progress-bar');
+    const txt = _el('so-import-progress-text');
+    const doneBtn = _el('so-import-done-btn');
+
+    try {
+      await SaleOutService.batchUpsert(_parsedRecords, {
+        batchSize: 100,
+        onProgress: (done, total) => {
+          const pct = Math.round(done / total * 100);
+          if (bar) bar.style.width = pct + '%';
+          if (txt) txt.textContent = `${done} / ${total} dòng (${pct}%)`;
+        },
+      });
+      if (txt) txt.textContent = `✓ Hoàn tất: ${_parsedRecords.length} dòng đã lưu`;
+      if (bar) bar.style.width = '100%';
+      if (doneBtn) doneBtn.style.display = '';
+    } catch (err) {
+      if (txt) txt.textContent = '✕ Lỗi: ' + err.message;
+      console.error('[SaleOutImport]', err);
+    }
+  }
+
+  // ── init & open ─────────────────────────────────────────────────────────
+  function init() {
+    const modal = _el('saleout-import-modal');
+    if (!modal) return;
+
+    // Close button
+    _el('saleout-import-close-btn')?.addEventListener('click', () => {
+      modal.classList.add('hidden');
+    });
+
+    // Dropzone
+    const dropzone = _el('so-import-dropzone');
+    const fileInput = _el('so-import-file-input');
+
+    dropzone?.addEventListener('click', () => fileInput?.click());
+    dropzone?.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('border-blue-400', 'bg-blue-50'); });
+    dropzone?.addEventListener('dragleave', () => dropzone.classList.remove('border-blue-400', 'bg-blue-50'));
+    dropzone?.addEventListener('drop', e => {
+      e.preventDefault();
+      dropzone.classList.remove('border-blue-400', 'bg-blue-50');
+      const file = e.dataTransfer?.files?.[0];
+      if (file) _handleFile(file);
+    });
+    fileInput?.addEventListener('change', () => {
+      if (fileInput.files?.[0]) _handleFile(fileInput.files[0]);
+    });
+
+    // Back button
+    _el('so-import-step1-back')?.addEventListener('click', () => _goToStep(1));
+
+    // Next button
+    _el('so-import-next-btn')?.addEventListener('click', async () => {
+      if (_currentStep === 1) {
+        // Nếu chưa chọn sheet thì dùng sheet đầu tiên
+        if (_workbook && _parsedRecords.length === 0) {
+          _tryParseSheet(_workbook.SheetNames[0]);
+        }
+        if (_parsedRecords.length === 0) return;
+        _renderPreview();
+        _goToStep(2);
+      } else if (_currentStep === 2) {
+        _goToStep(3);
+        await _doImport();
+        if (_onComplete) _onComplete(_parsedRecords.length);
+      }
+    });
+
+    // Done button
+    _el('so-import-done-btn')?.addEventListener('click', () => {
+      modal.classList.add('hidden');
+    });
+  }
+
+  function _handleFile(file) {
+    const namEl = _el('so-import-file-name');
+    if (namEl) namEl.textContent = file.name;
+    _parsedRecords = [];
+
+    _parseFile(file).then(sheetNames => {
+      if (sheetNames.length === 1) {
+        _tryParseSheet(sheetNames[0]);
+        // Enable next
+        const nextBtn = _el('so-import-next-btn');
+        if (nextBtn) nextBtn.disabled = _parsedRecords.length === 0;
+        // Hide sheet list
+        const sl = _el('so-sheet-list');
+        if (sl) sl.style.display = 'none';
+      } else {
+        // Show sheet list
+        const sl = _el('so-sheet-list');
+        const slItems = _el('so-sheet-list-items');
+        if (sl) sl.style.display = '';
+        if (slItems) {
+          slItems.innerHTML = sheetNames.map(name => `
+            <button class="so-sheet-btn text-sm px-4 py-2 border border-gray-300 rounded-lg hover:bg-blue-50 hover:border-blue-400 transition-colors text-left"
+                    data-sheet="${name}">${name}</button>`).join('');
+          slItems.querySelectorAll('.so-sheet-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+              slItems.querySelectorAll('.so-sheet-btn').forEach(b => b.classList.remove('bg-blue-50', 'border-blue-500'));
+              btn.classList.add('bg-blue-50', 'border-blue-500');
+              _tryParseSheet(btn.dataset.sheet);
+              const nextBtn = _el('so-import-next-btn');
+              if (nextBtn) nextBtn.disabled = _parsedRecords.length === 0;
+            });
+          });
+        }
+      }
+    }).catch(err => {
+      alert('Lỗi đọc file: ' + err.message);
+    });
+  }
+
+  function _tryParseSheet(sheetName) {
+    try {
+      _parsedRecords = _parseSheet(sheetName);
+    } catch (err) {
+      alert('Lỗi parse sheet: ' + err.message);
+      _parsedRecords = [];
+    }
+  }
+
+  function open(onComplete) {
+    _onComplete = onComplete;
+    _workbook = null;
+    _parsedRecords = [];
+    const modal = _el('saleout-import-modal');
+    if (!modal) return;
+    // Reset UI
+    const fileInput = _el('so-import-file-input');
+    if (fileInput) fileInput.value = '';
+    const namEl = _el('so-import-file-name');
+    if (namEl) namEl.textContent = '';
+    const sl = _el('so-sheet-list');
+    if (sl) sl.style.display = 'none';
+    const doneBtn = _el('so-import-done-btn');
+    if (doneBtn) doneBtn.style.display = 'none';
+    const bar = _el('so-import-progress-bar');
+    if (bar) bar.style.width = '0%';
+    const txt = _el('so-import-progress-text');
+    if (txt) txt.textContent = '';
+    _goToStep(1);
+    modal.classList.remove('hidden');
+  }
+
+  return { init, open };
+})();
