@@ -447,30 +447,32 @@ const DashboardRenderer = (() => {
   }
 
   function _applyCardColors(chartData, chartType, cardIndex) {
-    const idx = (cardIndex || 0) % _PALETTE.length;
-    const p = _PALETTE[idx];
+    const palette = APP_CONFIG.chartColors;
+    const offset = (cardIndex || 0) % palette.length;
     const resolvedType = chartType === 'area' ? 'line' : chartType;
     const isPolar = ['pie', 'doughnut', 'radar'].includes(resolvedType);
 
     if (isPolar) {
-      // Pie/doughnut: mỗi slice màu riêng, bắt đầu từ vị trí của card
-      const colors = APP_CONFIG.chartColors;
       if (chartData.datasets[0]) {
         chartData.datasets[0].backgroundColor = chartData.labels.map((_, i) =>
-          colors[(idx + i) % colors.length]
+          palette[(offset + i) % palette.length]
         );
         chartData.datasets[0].borderColor = '#fff';
         chartData.datasets[0].borderWidth = 2;
       }
     } else if (chartData.datasets.length === 1) {
-      // Single series: tất cả bars/điểm cùng 1 màu đặc trưng của card
-      chartData.datasets[0].backgroundColor = p.b + 'CC';
-      chartData.datasets[0].borderColor = p.b;
+      // Single series: mỗi bar/điểm có màu riêng
+      chartData.datasets[0].backgroundColor = chartData.labels.map((_, i) =>
+        palette[(offset + i) % palette.length] + 'CC'
+      );
+      chartData.datasets[0].borderColor = chartData.labels.map((_, i) =>
+        palette[(offset + i) % palette.length]
+      );
       chartData.datasets[0].borderWidth = 1;
     } else {
       // Multi series: mỗi series shift màu theo card
       chartData.datasets.forEach((ds, i) => {
-        const c = _PALETTE[(idx + i) % _PALETTE.length].b;
+        const c = palette[(offset + i) % palette.length];
         ds.backgroundColor = c + 'CC';
         ds.borderColor = c;
         ds.borderWidth = 2;
