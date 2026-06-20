@@ -36,7 +36,7 @@ const DataService = (() => {
   }
 
   async function _configGetRow(key) {
-    const where = encodeURIComponent(`(key,eq,${key})`);
+    const where = encodeURIComponent(`(Title,eq,${key})`);
     const res = await fetch(configApiUrl(`?where=${where}&limit=1`), { headers: headers() });
     if (!res.ok) throw new Error(`Config GET failed: ${res.status}`);
     const data = await res.json();
@@ -66,7 +66,7 @@ const DataService = (() => {
       } else {
         const res = await fetch(configApiUrl(), {
           method: 'POST', headers: headers(),
-          body: JSON.stringify({ Title: key, key, value: json }),
+          body: JSON.stringify({ Title: key, value: json }),
         });
         if (!res.ok) throw new Error(`POST failed: ${res.status} — ${await res.text()}`);
       }
@@ -275,8 +275,51 @@ const DataService = (() => {
     if (isConfigStoreReady()) await _configSet(_viewsLsKey(), views);
   }
 
+  // ── Saleout extra filter sync ─────────────────────────────────────────────
+  function _soFiltersLsKey() {
+    return _namespace === 'spm2' ? 'crm2_saleout_ef' : 'crm_saleout_ef';
+  }
+
+  async function syncSaleoutFilters() {
+    const lsKey = _soFiltersLsKey();
+    if (!isConfigStoreReady()) {
+      return JSON.parse(localStorage.getItem(lsKey) || '[]');
+    }
+    try {
+      const remote = await _configGet(lsKey);
+      if (remote && Array.isArray(remote)) {
+        localStorage.setItem(lsKey, JSON.stringify(remote));
+        return remote;
+      } else {
+        // Chỉ đọc local, KHÔNG tự push lên cloud — cần bấm "Đồng bộ" để push
+        return JSON.parse(localStorage.getItem(lsKey) || '[]');
+      }
+    } catch (e) {
+      console.error('[SyncSaleoutFilters]', e.message);
+      return JSON.parse(localStorage.getItem(lsKey) || '[]');
+    }
+  }
+
+  async function pushSaleoutFiltersToCloud(list) {
+    if (!isConfigStoreReady()) throw new Error('NocoDB config table chưa được cấu hình');
+    const lsKey = _soFiltersLsKey();
+    const data = list !== undefined ? list : JSON.parse(localStorage.getItem(lsKey) || '[]');
+    await _configSet(lsKey, data);
+    localStorage.setItem(lsKey, JSON.stringify(data));
+    return data.length;
+  }
+
+  // ns (optional): namespace tường minh để tránh race condition với background load
+  function saveSaleoutFilterData(list, ns) {
+    const resolvedNs = ns !== undefined ? ns : _namespace;
+    const lsKey = resolvedNs === 'spm2' ? 'crm2_saleout_ef' : 'crm_saleout_ef';
+    localStorage.setItem(lsKey, JSON.stringify(list || []));
+    // Không tự push lên NocoDB — cần bấm "Đồng bộ" để viewer thấy thay đổi
+  }
+
   return { setNamespace, fetchAll, batchUpsert,
            syncViews, pushViewsToCloud, savePivotView, loadPivotViews, deletePivotView,
            syncSlicers, pushSlicersToCloud, saveSlicerData,
+           syncSaleoutFilters, pushSaleoutFiltersToCloud, saveSaleoutFilterData,
            isConfigured, isConfigStoreReady };
 })();

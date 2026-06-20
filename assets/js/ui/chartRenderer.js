@@ -4,6 +4,8 @@ const ChartRenderer = (() => {
   let _sortType = 'none';
   let _drillData = [];
   let _drillConfig = null;
+  let _drillRecords = []; // records đang hiển thị trong modal (dùng cho export)
+  let _drillTitle   = ''; // tiêu đề modal
 
   function setType(type) { _chartType = type; }
   function getType()     { return _chartType; }
@@ -83,7 +85,9 @@ const ChartRenderer = (() => {
 
     // Tiêu đề
     const labelParts = [rowKey].concat(colKey != null ? [colKey] : []).filter(Boolean);
-    titleEl.textContent = 'Chi tiết: ' + labelParts.join(' — ');
+    _drillTitle = 'Chi tiết: ' + labelParts.join(' — ');
+    _drillRecords = records;
+    titleEl.textContent = _drillTitle;
     countEl.textContent = `${records.length} bản ghi`;
 
     // Bảng dữ liệu
@@ -121,6 +125,32 @@ const ChartRenderer = (() => {
     document.body.style.overflow = '';
   }
 
+  // ─── Xuất Excel cho modal drilldown ───────────────────────────────────────
+  function _exportDrillModal() {
+    if (!_drillRecords.length) return;
+    const fields = (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.fieldDefinitions) || [];
+    const header = fields.map(f => f.label);
+    const rows   = _drillRecords.map(row =>
+      fields.map(f => row[f.key] != null ? row[f.key] : '')
+    );
+    const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+    // Tự điều chỉnh độ rộng cột
+    ws['!cols'] = header.map((_, ci) => {
+      const maxLen = Math.max(
+        header[ci].length,
+        ...rows.map(r => String(r[ci] ?? '').length)
+      );
+      return { wch: Math.min(Math.max(maxLen + 2, 10), 50) };
+    });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Chi tiết');
+    // Tên file: loại bỏ ký tự không hợp lệ
+    const safeName = _drillTitle.replace(/[\\/:*?"<>|]/g, '_').slice(0, 60);
+    const d = new Date();
+    const ts = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+    XLSX.writeFile(wb, `${safeName}_${ts}.xlsx`);
+  }
+
   // Khởi tạo event đóng modal (chỉ 1 lần)
   let _modalEventsReady = false;
   function _initModalEvents() {
@@ -128,6 +158,7 @@ const ChartRenderer = (() => {
     _modalEventsReady = true;
     document.getElementById('drilldown-close')?.addEventListener('click', _closeDrillModal);
     document.getElementById('drilldown-backdrop')?.addEventListener('click', _closeDrillModal);
+    document.getElementById('drilldown-export')?.addEventListener('click', _exportDrillModal);
     document.addEventListener('keydown', e => { if (e.key === 'Escape') _closeDrillModal(); });
   }
 

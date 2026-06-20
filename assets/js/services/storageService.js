@@ -1,10 +1,12 @@
 const StorageService = (() => {
   const DB_NAME = 'crm_dashboard_db';
-  const DB_VERSION = 3;
+  const DB_VERSION = 4;
   const STORE_RECORDS  = 'records';
   const STORE_SALEOUT  = 'saleout';
   const STORE_RECORDS2 = 'records2';
   const STORE_SALEOUT2 = 'saleout2';
+  const STORE_ECN      = 'ecn';
+  const STORE_ECN2     = 'ecn2';
   let _db = null;
 
   function _open() {
@@ -19,6 +21,8 @@ const StorageService = (() => {
         if (!db.objectStoreNames.contains(STORE_SALEOUT))  db.createObjectStore(STORE_SALEOUT,  { keyPath: '_key' });
         if (!db.objectStoreNames.contains(STORE_RECORDS2)) db.createObjectStore(STORE_RECORDS2, { keyPath: '_key' });
         if (!db.objectStoreNames.contains(STORE_SALEOUT2)) db.createObjectStore(STORE_SALEOUT2, { keyPath: '_key' });
+        if (!db.objectStoreNames.contains(STORE_ECN))      db.createObjectStore(STORE_ECN,      { keyPath: '_key' });
+        if (!db.objectStoreNames.contains(STORE_ECN2))     db.createObjectStore(STORE_ECN2,     { keyPath: '_key' });
       };
     });
   }
@@ -86,6 +90,18 @@ const StorageService = (() => {
   async function putSaleOut2Many(r)          { return _putMany(STORE_SALEOUT2, r); }
   async function clearAndPutSaleOut2Many(r)  { return _clearAndPutMany(STORE_SALEOUT2, r); }
 
+  // ECN — dataset 1
+  async function getEcnAll()                 { return _getAll(STORE_ECN); }
+  async function putEcnMany(r)               { return _putMany(STORE_ECN, r); }
+  async function clearAndPutEcnMany(r)       { return _clearAndPutMany(STORE_ECN, r); }
+
+  // ECN — dataset 2
+  async function getEcn2All()                { return _getAll(STORE_ECN2); }
+  async function putEcn2Many(r)              { return _putMany(STORE_ECN2, r); }
+  async function clearAndPutEcn2Many(r)      { return _clearAndPutMany(STORE_ECN2, r); }
+
   return { getAll, putMany, clearAndPutMany, count, getSaleOutAll, putSaleOutMany, clearAndPutSaleOutMany,
-           getAll2, putMany2, clearAndPutMany2, count2, getSaleOut2All, putSaleOut2Many, clearAndPutSaleOut2Many };
+           getAll2, putMany2, clearAndPutMany2, count2, getSaleOut2All, putSaleOut2Many, clearAndPutSaleOut2Many,
+           getEcnAll, putEcnMany, clearAndPutEcnMany,
+           getEcn2All, putEcn2Many, clearAndPutEcn2Many };
 })();

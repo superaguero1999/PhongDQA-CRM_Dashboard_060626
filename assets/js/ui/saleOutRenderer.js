@@ -10,10 +10,64 @@ const SaleOutRenderer = (() => {
   let _productTopN  = 20;
   let _productOrder = 'desc';
   let _isLoading    = false;
+  let _extraFilters = [];   // [{id, field, selectedValues}]
+  let _efSearchQueries = {};
+  let _namespace = 'spm1'; // track namespace riêng để tránh race condition
+  let _ecnMap = {};         // {model_code: {applied_month: [ecn_records]}}
+
+  function setNamespace(ns) { _namespace = ns; }
+
+  function setEcnMap(map) { _ecnMap = map || {}; }
+
+  // ── ECN highlight helpers ─────────────────────────────────────────────────
+  function _ecnCoverage(modelCode, cellMonth) {
+    const byMonth = _ecnMap[modelCode] || {};
+    const cellNum = ErrorRateService.monthToNum(cellMonth);
+
+    // Tìm applied_month mới nhất có window 12 tháng cover cell này
+    let latestCoveringStart = 0;
+    for (const [m, ecns] of Object.entries(byMonth)) {
+      if (!ecns.length) continue;
+      const start = ErrorRateService.monthToNum(m);
+      if (cellNum >= start && cellNum < start + 12 && start > latestCoveringStart) {
+        latestCoveringStart = start;
+      }
+    }
+    if (latestCoveringStart === 0) return 0;
+
+    // Rank = số ECN applied_month <= latestCoveringStart
+    // → ECN mới hơn = rank cao hơn = màu đậm hơn; toàn bộ 12 tháng sau ECN đó đều cùng rank
+    const allStarts = Object.entries(byMonth)
+      .filter(([, ecns]) => ecns.length > 0)
+      .map(([m]) => ErrorRateService.monthToNum(m))
+      .sort((a, b) => a - b);
+    return allStarts.filter(n => n <= latestCoveringStart).length;
+  }
+
+  function _ecnBgClass(count) {
+    if (!count) return '';
+    if (count === 1) return 'ecn-hl-1';
+    if (count === 2) return 'ecn-hl-2';
+    if (count <= 4)  return 'ecn-hl-3';
+    return 'ecn-hl-4';
+  }
+
+  function _hasEcnStart(modelCode, month) {
+    return !!(_ecnMap[modelCode]?.[month]?.length);
+  }
 
   const COLORS = APP_CONFIG ? APP_CONFIG.chartColors : [
     '#3B82F6','#EF4444','#10B981','#F59E0B','#8B5CF6',
     '#06B6D4','#EC4899','#84CC16','#F97316','#6366F1',
+  ];
+
+  const _EF_PALETTE = [
+    { h: '#7C3AED', b: '#8B5CF6', bg: '#F5F3FF' },
+    { h: '#0891B2', b: '#06B6D4', bg: '#ECFEFF' },
+    { h: '#DB2777', b: '#EC4899', bg: '#FDF2F8' },
+    { h: '#D97706', b: '#F59E0B', bg: '#FFFBEB' },
+    { h: '#E11D48', b: '#F43F5E', bg: '#FFF1F2' },
+    { h: '#65A30D', b: '#84CC16', bg: '#F7FEE7' },
   ];
 
   function _el(id) { return document.getElementById(id); }
@@ -76,7 +130,7 @@ const SaleOutRenderer = (() => {
     if (which === 'data' && !_tableRendered) _renderSaleOutTable();
   }
 
-  // ── Sidebar filter (pill buttons — giống slicer "Biểu đồ tổng") ──────────
+  // ── Sidebar filter (pill buttons — Tháng / SP + extra filters) ───────────
   function renderSidebar() {
     const container = _el('saleout-sidebar-content');
     if (!container) return;
@@ -105,8 +159,11 @@ const SaleOutRenderer = (() => {
     const productSearchEl = container.querySelector('.so-search[data-type="product"]');
     if (monthSearchEl)   _soSearchQueries.month   = monthSearchEl.value;
     if (productSearchEl) _soSearchQueries.product = productSearchEl.value;
+    container.querySelectorAll('.so-ef-search').forEach(input => {
+      _efSearchQueries[input.dataset.efid] = input.value;
+    });
 
-    // Màu cho từng bộ lọc
+    // Màu cho bộ lọc cố định
     const _SC = {
       month:   { h: '#2563EB', b: '#3B82F6', bg: '#EFF6FF' },
       product: { h: '#059669', b: '#10B981', bg: '#ECFDF5' },
@@ -142,10 +199,51 @@ const SaleOutRenderer = (() => {
         </div>`;
     }
 
+    // Extra filter cards
+    const extraHtml = _extraFilters.map((ef, idx) => {
+      const p = _EF_PALETTE[idx % _EF_PALETTE.length];
+      const fieldDef = APP_CONFIG.fieldDefinitions.find(f => f.key === ef.field);
+      const label = fieldDef ? fieldDef.label : ef.field;
+      const uniqueVals = [...new Set(_errorData.map(r => String(r[ef.field] ?? '')).filter(Boolean))].sort();
+      const searchVal = (_efSearchQueries[ef.id] || '');
+      const pills = uniqueVals.map(v => {
+        const isActive = ef.selectedValues.length === 0 || ef.selectedValues.includes(v);
+        const escaped = v.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+        const activeStyle = `background:${p.h};color:white;border-color:${p.h}`;
+        const inactiveStyle = 'background:white;color:#6B7280;border-color:#E5E7EB';
+        return `<button class="so-ef-pill text-xs px-1.5 py-0.5 rounded border transition-colors"
+                  style="${isActive ? activeStyle : inactiveStyle}"
+                  data-efid="${ef.id}" data-val="${escaped}">${v||'(trống)'}</button>`;
+      }).join('');
+      return `
+        <div class="so-ef-card rounded-xl mb-3 overflow-hidden shadow-sm"
+             style="border:2px solid ${p.b};background:${p.bg}" data-efid="${ef.id}">
+          <div class="flex items-center justify-between px-3 py-2" style="background:${p.h}">
+            <span class="font-bold text-white text-sm tracking-wide truncate">${label}</span>
+            ${AuthService.isEditor() ? `<button class="so-ef-del text-white/60 hover:text-white ml-2 flex-shrink-0 text-base font-bold leading-none" data-efid="${ef.id}">✕</button>` : ''}
+          </div>
+          <div class="px-2 pt-2 pb-1">
+            <input type="text" class="so-ef-search w-full text-xs rounded px-2 py-1 mb-1.5 outline-none bg-white placeholder-gray-300"
+                   style="border:1.5px solid ${p.b}80"
+                   data-efid="${ef.id}" placeholder="🔍 Tìm..." value="${searchVal.replace(/"/g,'&quot;')}">
+            <div class="so-ef-pills flex flex-wrap gap-1 max-h-36 overflow-y-auto" data-efid="${ef.id}">
+              ${uniqueVals.length === 0
+                ? `<span class="text-gray-300 italic">Không có dữ liệu</span>`
+                : pills}
+            </div>
+            ${ef.selectedValues.length
+              ? `<button class="so-ef-clear font-semibold mt-1 block text-xs transition-colors" style="color:${p.h}" data-efid="${ef.id}">✕ Bỏ lọc</button>`
+              : ''}
+          </div>
+        </div>`;
+    }).join('');
+
     container.innerHTML =
       _filterCard('month',   'Tháng',    'so-month-pills',   _soSearchQueries.month,   allMonths.map(m => _pill('month', m)).join('')) +
-      _filterCard('product', 'Sản phẩm', 'so-product-pills', _soSearchQueries.product, allProducts.map(p => _pill('product', p)).join(''));
+      _filterCard('product', 'Sản phẩm', 'so-product-pills', _soSearchQueries.product, allProducts.map(p => _pill('product', p)).join('')) +
+      extraHtml;
 
+    // ── Bind fixed filter events ──
     container.querySelectorAll('.so-pill').forEach(btn => {
       btn.addEventListener('click', () => _togglePill(btn.dataset.type, btn.dataset.value));
     });
@@ -159,22 +257,60 @@ const SaleOutRenderer = (() => {
       });
     });
 
-    // Bind search — lọc pill tại chỗ, không re-render
     container.querySelectorAll('.so-search').forEach(input => {
       function applyFilter() {
         const q = input.value.toLowerCase().trim();
-        const pillsEl = input.dataset.type === 'month'
-          ? _el('so-month-pills')
-          : _el('so-product-pills');
+        const pillsEl = input.dataset.type === 'month' ? _el('so-month-pills') : _el('so-product-pills');
         if (!pillsEl) return;
         pillsEl.querySelectorAll('.so-pill').forEach(btn => {
           btn.style.display = !q || btn.textContent.toLowerCase().includes(q) ? '' : 'none';
         });
       }
-      applyFilter(); // áp dụng ngay nếu có query từ lần trước
+      applyFilter();
       input.addEventListener('input', () => {
         _soSearchQueries[input.dataset.type] = input.value;
         applyFilter();
+      });
+    });
+
+    // ── Bind extra filter events ──
+    container.querySelectorAll('.so-ef-del').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.efid;
+        _extraFilters = _extraFilters.filter(ef => ef.id !== id);
+        delete _efSearchQueries[id];
+        _saveExtraFilters();
+        renderSidebar();
+        _onFilterApply();
+      });
+    });
+
+    container.querySelectorAll('.so-ef-pill').forEach(btn => {
+      btn.addEventListener('click', () => _toggleExtraPill(btn.dataset.efid, btn.dataset.val));
+    });
+
+    container.querySelectorAll('.so-ef-clear').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const ef = _extraFilters.find(f => f.id === btn.dataset.efid);
+        if (ef) { ef.selectedValues = []; _saveExtraFilters(); }
+        renderSidebar();
+        _onFilterApply();
+      });
+    });
+
+    container.querySelectorAll('.so-ef-search').forEach(input => {
+      function applyEfFilter() {
+        const q = input.value.toLowerCase().trim();
+        const wrap = container.querySelector(`.so-ef-pills[data-efid="${input.dataset.efid}"]`);
+        if (!wrap) return;
+        wrap.querySelectorAll('.so-ef-pill').forEach(btn => {
+          btn.style.display = !q || btn.textContent.toLowerCase().includes(q) ? '' : 'none';
+        });
+      }
+      applyEfFilter();
+      input.addEventListener('input', () => {
+        _efSearchQueries[input.dataset.efid] = input.value;
+        applyEfFilter();
       });
     });
   }
@@ -294,7 +430,25 @@ const SaleOutRenderer = (() => {
       fe = fe.filter(r => nSet.has(norm(r.product_shortname)));
       fs = fs.filter(r => nSet.has(norm(r.short_name)));
     }
+    for (const ef of _extraFilters) {
+      if (ef.selectedValues.length > 0) {
+        const vSet = new Set(ef.selectedValues);
+        fe = fe.filter(r => vSet.has(String(r[ef.field] ?? '')));
+      }
+    }
     return { fe, fs };
+  }
+
+  // Chỉ áp dụng extra filters (dùng cho TLL rate section — ErrorRateService sẽ tự apply months/shortNames)
+  function _applyExtraFiltersOnly(errors) {
+    let fe = errors;
+    for (const ef of _extraFilters) {
+      if (ef.selectedValues.length > 0) {
+        const vSet = new Set(ef.selectedValues);
+        fe = fe.filter(r => vSet.has(String(r[ef.field] ?? '')));
+      }
+    }
+    return fe;
   }
 
   // ── Điều phối chính ───────────────────────────────────────────────────────
@@ -408,9 +562,23 @@ const SaleOutRenderer = (() => {
   // ── Bảng 2: Số lượng lỗi ────────────────────────────────────────────────
   function _errCountMatrixHtml(products, months, fe) {
     const norm = s => ErrorRateService.normName(s);
+    const saleProds = new Set(products.map(([sn]) => norm(sn)));
+
     const errMap = new Map();
     for (const r of fe) { const k=`${norm(r.product_shortname)}|${r.month}`; errMap.set(k,(errMap.get(k)||0)+1); }
     const cnt = (sn,m) => errMap.get(`${norm(sn)}|${m}`) || 0;
+
+    // Đếm lỗi không khớp tên SP với Sale Out
+    const unmatchedByMonth = new Map();
+    let unmatchedTotal = 0;
+    for (const r of fe) {
+      const pNorm = norm(r.product_shortname);
+      if (!pNorm || !saleProds.has(pNorm)) {
+        unmatchedTotal++;
+        const m = r.month || '';
+        unmatchedByMonth.set(m, (unmatchedByMonth.get(m) || 0) + 1);
+      }
+    }
 
     // Tìm max để scale màu
     let maxV = 0;
@@ -418,8 +586,10 @@ const SaleOutRenderer = (() => {
 
     const cntBg = v => { if (!v) return ''; const r=v/Math.max(maxV,1); if (r>0.6) return 'bg-orange-200'; if (r>0.3) return 'bg-orange-100'; return 'bg-orange-50'; };
 
-    const colTotals  = months.map(m => products.reduce((s,[sn])=>s+cnt(sn,m),0));
-    const grandTotal = colTotals.reduce((a,b)=>a+b,0);
+    const colTotals   = months.map(m => products.reduce((s,[sn])=>s+cnt(sn,m),0));
+    const matchedTotal = colTotals.reduce((a,b)=>a+b,0);
+    const grandTotal  = matchedTotal + unmatchedTotal;
+
     const summaryRow = `<tr class="bg-orange-100 border-b-2 border-orange-300">
       <td colspan="3" class="px-3 py-2 text-xs font-bold text-orange-900 sticky left-0 z-[15] bg-orange-100 whitespace-nowrap">Tổng lỗi theo tháng</td>
       <td class="px-3 py-2 text-right text-xs font-bold sticky left-[360px] z-[15] text-orange-900 bg-orange-200 border-r-2 border-orange-300">${grandTotal||'—'}</td>
@@ -439,10 +609,20 @@ const SaleOutRenderer = (() => {
       </tr>`;
     }).join('');
 
+    // Hàng lỗi không khớp tên SP với Sale Out
+    const unmatchedRow = unmatchedTotal > 0 ? `
+      <tr class="bg-yellow-50 border-t-2 border-yellow-300 hover:bg-yellow-100 transition-colors">
+        <td class="px-3 py-1.5 text-xs text-yellow-700 sticky left-0 bg-yellow-50 z-[10] font-mono whitespace-nowrap">—</td>
+        <td class="px-3 py-1.5 text-xs text-yellow-800 italic sticky left-[100px] bg-yellow-50 z-[10] whitespace-nowrap truncate" title="Lỗi không tìm thấy tên SP tương ứng trong Sale Out">⚠️ Không khớp Sale Out</td>
+        <td class="px-3 py-1.5 text-xs text-yellow-700 sticky left-[240px] bg-yellow-50 z-[10] whitespace-nowrap">—</td>
+        <td class="px-3 py-1.5 text-right text-xs font-bold sticky left-[360px] z-[10] bg-yellow-100 text-yellow-800 border-r border-yellow-300">${unmatchedTotal}</td>
+        ${months.map(m => { const v = unmatchedByMonth.get(m)||0; return `<td class="px-3 py-1.5 text-right text-xs ${v?'text-yellow-700':'text-gray-300'}">${v||'—'}</td>`; }).join('')}
+      </tr>` : '';
+
     return _tableWrap('border-orange-200','bg-orange-50',
       '<span class="text-orange-700">🔢 Số lượng lỗi</span>',
       '— màu đậm = nhiều lỗi hơn',
-      summaryRow, colHeaderRow, rows);
+      summaryRow, colHeaderRow, rows + unmatchedRow);
   }
 
   // ── Bảng 3: Dữ liệu Sale Out ─────────────────────────────────────────────
@@ -460,9 +640,19 @@ const SaleOutRenderer = (() => {
     const colHeaderRow = _thRow(months, 'Tổng theo model', 'bg-blue-600', 'bg-blue-700');
 
     const rows = products.map(([sn,info],ri) => {
+      const mc = info.model_code || '';
       const vals = months.map(m=>valMap.get(`${sn}|${m}`)||0);
       const rowTotal = vals.reduce((a,v)=>a+v, 0);
-      const cells = vals.map(v=>`<td class="px-3 py-1.5 text-right text-xs text-gray-700">${v?fmt(v):'—'}</td>`).join('');
+      const cells = months.map((m, idx) => {
+        const v        = vals[idx];
+        const coverage = _ecnCoverage(mc, m);
+        const bgClass  = _ecnBgClass(coverage);
+        const hasStart = _hasEcnStart(mc, m);
+        const dot      = hasStart
+          ? `<span class="ecn-dot" data-ecn="${mc}|${m}" title="Có ECN áp dụng tại tháng này — Click để xem chi tiết"></span>`
+          : '';
+        return `<td class="px-3 py-1.5 text-right text-xs text-gray-700 ${bgClass}" style="position:relative">${dot}${v?fmt(v):'—'}</td>`;
+      }).join('');
       const rowBg = ri%2===0 ? 'bg-white' : 'bg-gray-50';
       return `<tr class="${rowBg} hover:bg-blue-50 transition-colors">
         ${_infoTds(info,sn,rowBg)}
@@ -474,6 +664,52 @@ const SaleOutRenderer = (() => {
     return _tableWrap('border-blue-200','bg-blue-50',
       '<span class="text-blue-700">📦 Dữ liệu Sale Out</span>', '',
       summaryRow, colHeaderRow, rows);
+  }
+
+  // ── ECN detail popup (reuse drilldown-modal) ───────────────────────────────
+  function _showEcnPopup(modelCode, month) {
+    const ecns = _ecnMap[modelCode]?.[month] || [];
+    const titleEl = document.getElementById('drilldown-title');
+    const countEl = document.getElementById('drilldown-count');
+    const tableEl = document.getElementById('drilldown-table-wrap');
+    const modal   = document.getElementById('drilldown-modal');
+    if (!modal) return;
+
+    if (titleEl) titleEl.textContent = `ECN — Mã SP: ${modelCode} | Tháng áp dụng: ${month}`;
+    if (countEl) countEl.textContent = `${ecns.length} ECN record${ecns.length !== 1 ? 's' : ''}`;
+
+    if (tableEl) {
+      if (!ecns.length) {
+        tableEl.innerHTML = '<p class="p-6 text-sm text-gray-400 italic">Không có dữ liệu ECN.</p>';
+      } else {
+        tableEl.innerHTML = `
+          <table class="w-full text-sm border-collapse">
+            <thead class="bg-gray-50 sticky top-0">
+              <tr>
+                <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 border-b">Mã ECN</th>
+                <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 border-b">Tên / Nội dung ECN</th>
+                <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 border-b">Tháng áp dụng</th>
+                <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 border-b">Thời gian áp dụng thực tế</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${ecns.map((e, i) => `
+                <tr class="${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}">
+                  <td class="px-4 py-2 text-xs font-semibold text-purple-700">${e.ecn_code || '—'}</td>
+                  <td class="px-4 py-2 text-xs text-gray-700">${e.ecn_name || '—'}</td>
+                  <td class="px-4 py-2 text-xs font-medium text-amber-700">${e.applied_month || '—'}</td>
+                  <td class="px-4 py-2 text-xs text-gray-500">${e.actual_date || '—'}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>`;
+      }
+    }
+
+    // Ẩn nút Xuất Excel (không cần cho ECN popup)
+    const exportBtn = document.getElementById('drilldown-export');
+    if (exportBtn) exportBtn.style.display = 'none';
+
+    modal.style.display = 'flex';
   }
 
   // ── Error rate tables ────────────────────────────────────────────────────
@@ -491,8 +727,9 @@ const SaleOutRenderer = (() => {
       return { byProduct: [], byMonth: [] };
     }
 
-    const byProduct = ErrorRateService.calcByProduct(_errorData, _saleoutData, _filters);
-    const byMonth   = ErrorRateService.calcByMonth(_errorData, _saleoutData, _filters);
+    const _efFiltered = _applyExtraFiltersOnly(_errorData);
+    const byProduct = ErrorRateService.calcByProduct(_efFiltered, _saleoutData, _filters);
+    const byMonth   = ErrorRateService.calcByMonth(_efFiltered, _saleoutData, _filters);
 
     function _rateColor(rate) {
       if (rate === null) return 'text-gray-400';
@@ -567,8 +804,9 @@ const SaleOutRenderer = (() => {
 
   // ── Charts ───────────────────────────────────────────────────────────────
   function _renderCharts() {
-    const byProduct = ErrorRateService.calcByProduct(_errorData, _saleoutData, _filters);
-    const byMonth   = ErrorRateService.calcByMonth(_errorData, _saleoutData, _filters);
+    const _efFiltered = _applyExtraFiltersOnly(_errorData);
+    const byProduct = ErrorRateService.calcByProduct(_efFiltered, _saleoutData, _filters);
+    const byMonth   = ErrorRateService.calcByMonth(_efFiltered, _saleoutData, _filters);
 
     if (_chartProduct) { _chartProduct.destroy(); _chartProduct = null; }
     if (_chartMonth)   { _chartMonth.destroy();   _chartMonth   = null; }
@@ -671,6 +909,88 @@ const SaleOutRenderer = (() => {
     }
   }
 
+  // ── Extra filter helpers ─────────────────────────────────────────────────
+  function _saveExtraFilters() {
+    if (typeof DataService !== 'undefined' && DataService.saveSaleoutFilterData) {
+      // Truyền _namespace tường minh để tránh race condition với background SPM2 load
+      DataService.saveSaleoutFilterData([..._extraFilters], _namespace);
+    }
+  }
+
+  function _toggleExtraPill(efId, value) {
+    const ef = _extraFilters.find(f => f.id === efId);
+    if (!ef) return;
+    const allVals = [...new Set(_errorData.map(r => String(r[ef.field] ?? '')).filter(Boolean))];
+    let next;
+    if (ef.selectedValues.length === 0) {
+      next = [value];
+    } else {
+      const idx = ef.selectedValues.indexOf(value);
+      next = idx === -1 ? [...ef.selectedValues, value] : ef.selectedValues.filter(v => v !== value);
+      if (next.length === 0 || next.length === allVals.length) next = [];
+    }
+    ef.selectedValues = next;
+    _saveExtraFilters();
+
+    const _sidebar   = _el('saleout-sidebar-content');
+    const _pillsWrap = _sidebar?.querySelector(`.so-ef-pills[data-efid="${efId}"]`);
+    const _savedSidebar = _sidebar?.scrollTop    || 0;
+    const _savedPills   = _pillsWrap?.scrollTop  || 0;
+
+    renderSidebar();
+    _onFilterApply();
+
+    requestAnimationFrame(() => {
+      const ns = _el('saleout-sidebar-content');
+      if (ns) ns.scrollTop = _savedSidebar;
+      const np = ns?.querySelector(`.so-ef-pills[data-efid="${efId}"]`);
+      if (np) np.scrollTop = _savedPills;
+    });
+  }
+
+  function _renderAddSoFilterDropdown() {
+    const fieldListEl = _el('add-so-filter-field-list');
+    if (!fieldListEl) return;
+    const existingFields = new Set(_extraFilters.map(ef => ef.field));
+    const available = APP_CONFIG.fieldDefinitions.filter(f => {
+      if (existingFields.has(f.key)) return false;
+      if (f.key === 'month' || f.key === 'product_shortname') return false;
+      return _errorData.some(r => r[f.key] !== undefined && r[f.key] !== null && r[f.key] !== '');
+    });
+    if (!available.length) {
+      fieldListEl.innerHTML = `<p class="text-xs text-gray-400 px-3 py-2 italic">Đã thêm tất cả trường có dữ liệu</p>`;
+      return;
+    }
+    fieldListEl.innerHTML = available.map(f => `
+      <button class="add-so-filter-field w-full text-left text-xs px-3 py-2 hover:bg-blue-50 hover:text-blue-700
+                     text-gray-700 transition-colors border-b border-gray-50 last:border-0"
+              data-field="${f.key}">${f.label}</button>
+    `).join('');
+    fieldListEl.querySelectorAll('.add-so-filter-field').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        _extraFilters.push({ id: 'ef_' + Date.now(), field: btn.dataset.field, selectedValues: [] });
+        _saveExtraFilters();
+        const dd = _el('add-so-filter-dropdown');
+        if (dd) dd.style.display = 'none';
+        renderSidebar();
+        _onFilterApply();
+      });
+    });
+  }
+
+  function getExtraFilters() { return _extraFilters; }
+
+  function setExtraFilters(list) {
+    _extraFilters = Array.isArray(list) ? list.map(ef => ({
+      id: ef.id || ('ef_' + Date.now()),
+      field: ef.field || '',
+      selectedValues: Array.isArray(ef.selectedValues) ? ef.selectedValues : [],
+    })).filter(ef => ef.field) : [];
+    _efSearchQueries = {};
+    _tableRendered = false;
+  }
+
   // ── Public API ───────────────────────────────────────────────────────────
   function setData(saleoutData, errorData) {
     _isLoading   = false;
@@ -766,10 +1086,99 @@ const SaleOutRenderer = (() => {
         _renderRateSection();
       });
     });
+
+    // ── ECN dot click → popup ──────────────────────────────────────────────
+    document.getElementById('saleout-table-container')?.addEventListener('click', e => {
+      const dot = e.target.closest('.ecn-dot');
+      if (!dot) return;
+      const [modelCode, month] = dot.dataset.ecn.split('|');
+      _showEcnPopup(modelCode, month);
+    });
+
+    // Đóng drilldown modal khi click backdrop hoặc nút close
+    document.getElementById('drilldown-backdrop')?.addEventListener('click', () => {
+      const modal = document.getElementById('drilldown-modal');
+      if (modal) modal.style.display = 'none';
+      const exportBtn = document.getElementById('drilldown-export');
+      if (exportBtn) exportBtn.style.display = '';
+    });
+    document.getElementById('drilldown-close')?.addEventListener('click', () => {
+      const modal = document.getElementById('drilldown-modal');
+      if (modal) modal.style.display = 'none';
+      const exportBtn = document.getElementById('drilldown-export');
+      if (exportBtn) exportBtn.style.display = '';
+    });
+
+    // ── "+ Thêm bộ lọc" button ──────────────────────────────────────────────
+    const addSoBtn  = _el('btn-add-so-filter');
+    const addSoDd   = _el('add-so-filter-dropdown');
+    if (addSoBtn && addSoDd) {
+      addSoBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        const isOpen = addSoDd.style.display !== 'none';
+        addSoDd.style.display = isOpen ? 'none' : '';
+        if (!isOpen) _renderAddSoFilterDropdown();
+      });
+      addSoDd.addEventListener('click', e => e.stopPropagation());
+      document.addEventListener('click', () => { addSoDd.style.display = 'none'; });
+    }
   }
 
   function getFilters()    { return _filters; }
   function getActiveSubTab() { return _activeSubTab; }
 
-  return { init, setData, render, renderSidebar, setLoading, getFilters, getActiveSubTab };
+  // Direct filter API (dùng bởi ChatbotService — bypass DOM click để tránh stale reference)
+  function setMonthFilter(months) {
+    _filters.months = Array.isArray(months) ? months : [];
+    renderSidebar();
+    _onFilterApply();
+  }
+  function setProductFilter(shortNames) {
+    _filters.shortNames = Array.isArray(shortNames) ? shortNames : [];
+    renderSidebar();
+    _onFilterApply();
+  }
+
+  function getCurrentData() {
+    try {
+      const efFiltered = _applyExtraFiltersOnly(_errorData);
+      const byProduct  = ErrorRateService.calcByProduct(efFiltered, _saleoutData, _filters);
+      const byMonth    = ErrorRateService.calcByMonth(efFiltered, _saleoutData, _filters);
+      const sortedByRate = [...byProduct].sort((a, b) =>
+        _productOrder === 'asc' ? (a.rate || 0) - (b.rate || 0) : (b.rate || 0) - (a.rate || 0)
+      );
+      const sortedByErrors = [...byProduct].sort((a, b) => (b.errors || 0) - (a.errors || 0));
+      const sortedBySale   = [...byProduct].sort((a, b) => (b.sale   || 0) - (a.sale   || 0));
+      // rawErrorCount = tổng lỗi sau filter (bao gồm cả SP không có saleout) — khớp "Tổng lỗi theo tháng" trên bảng
+      const { fe: rawFe } = _applyFilters();
+      // overallRate = TLL% lũy kế toàn giai đoạn = rate của tháng cuối cùng trong byMonth
+      const lastMonth = byMonth[byMonth.length - 1];
+      const overallRate = lastMonth?.rate ?? null;
+      return {
+        byProduct: (_productTopN > 0 ? sortedByRate.slice(0, _productTopN) : sortedByRate)
+          .map(r => ({ name: r.short_name, errors: r.errors, sale: r.sale, rate: r.rate })),
+        byProductByErrors: sortedByErrors.slice(0, 15)
+          .map(r => ({ name: r.short_name, errors: r.errors, sale: r.sale, rate: r.rate })),
+        byProductBySale: sortedBySale.slice(0, 20)
+          .map(r => ({ name: r.short_name, errors: r.errors, sale: r.sale, rate: r.rate })),
+        byMonth: byMonth.map(r => ({ month: r.month, errors: r.errors, sale: r.sale, rate: r.rate })),
+        rawErrorCount: rawFe.length,
+        overallRate,
+        order: _productOrder,
+        topN:  _productTopN,
+      };
+    } catch (_) { return { byProduct: [], byProductByErrors: [], byMonth: [], rawErrorCount: 0, overallRate: null, order: 'desc', topN: 20 }; }
+  }
+
+  function getUnfilteredByMonth() {
+    try {
+      const efFiltered = _applyExtraFiltersOnly(_errorData);
+      // Giữ product filter (shortNames) nhưng bỏ month filter → trả về toàn bộ tháng của SP đang lọc
+      const filtersNoMonth = { months: [], shortNames: _filters.shortNames || [] };
+      const byMonth = ErrorRateService.calcByMonth(efFiltered, _saleoutData, filtersNoMonth);
+      return byMonth.map(r => ({ month: r.month, errors: r.errors, sale: r.sale, rate: r.rate }));
+    } catch (_) { return []; }
+  }
+
+  return { init, setData, render, renderSidebar, setLoading, getFilters, getExtraFilters, setExtraFilters, setNamespace, setEcnMap, getActiveSubTab, getCurrentData, getUnfilteredByMonth, setMonthFilter, setProductFilter };
 })();

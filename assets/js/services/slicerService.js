@@ -57,6 +57,25 @@ const SlicerService = (() => {
     );
   }
 
+  // Tạo hoặc cập nhật slicer cho field — dùng bởi ChatbotService khi ở Dashboard tab
+  function setFieldFilter(field, values) {
+    const slicers = _load();
+    let s = slicers.find(sl => sl.field === field);
+    if (!s) {
+      s = { id: 'sl_ai_' + field, field, selectedValues: [], linkedCharts: 'all' };
+      slicers.push(s);
+    }
+    s.selectedValues = Array.isArray(values) ? [...values] : [];
+    _save(slicers);
+  }
+
+  // Xoá tất cả selectedValues của mọi slicer (không xoá slicer, chỉ reset giá trị)
+  function clearAllValues() {
+    const slicers = _load();
+    slicers.forEach(s => { s.selectedValues = []; });
+    _save(slicers);
+  }
+
   function getUniqueValues(data, field) {
     const vals = new Set();
     data.forEach(row => {
@@ -66,5 +85,5 @@ const SlicerService = (() => {
     return [...vals].sort((a, b) => a.localeCompare(b, 'vi'));
   }
 
-  return { setNamespace, getAll, add, remove, toggleValue, clearValues, setLinkedCharts, getFilteredData, getUniqueValues };
+  return { setNamespace, getAll, add, remove, toggleValue, clearValues, setLinkedCharts, getFilteredData, getUniqueValues, setFieldFilter, clearAllValues };
 })();

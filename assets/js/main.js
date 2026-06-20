@@ -1,11 +1,83 @@
 // ─── App State ─────────────────────────────────────────────────────────────
-let _activeDataset = 'spm1'; // 'spm1' | 'spm2'
-let _spm1Data = [], _spm1Saleout = [];
-let _spm2Data = [], _spm2Saleout = [];
+let _activeDataset  = 'spm1'; // 'spm1' | 'spm2'
+let _activeSection  = 'saleout'; // 'saleout' | 'dashboard' | 'pivot' — dùng bởi ChatbotService
+let _spm1Data = [], _spm1Saleout = [], _spm1Ecn = [];
+let _spm2Data = [], _spm2Saleout = [], _spm2Ecn = [];
 let _allData     = []; // alias → active dataset
 let _saleoutData = []; // alias → active saleout
 let _pivotResult = null;
 let _isSpm2Loading = true; // SPM2 loads in background; true until done
+
+// Đọc extra filters từ localStorage theo namespace (luôn fresh, không stale)
+function _soFiltersFromLS(ns) {
+  const key = ns === 'spm2' ? 'crm2_saleout_ef' : 'crm_saleout_ef';
+  return JSON.parse(localStorage.getItem(key) || '[]');
+}
+
+// ── AppState — dùng bởi ChatbotService để đọc ngữ cảnh hiện tại ─────────────
+window.AppState = {
+  getSummary() {
+    try {
+      const filters  = SaleOutRenderer.getFilters?.() || {};
+      const activeSubTab = SaleOutRenderer.getActiveSubTab?.() || '';
+      const tableData = SaleOutRenderer.getCurrentData?.() || { byProduct: [], byProductByErrors: [], byProductBySale: [], byMonth: [], order: 'desc', topN: 20 };
+      return {
+        activeDataset:   _activeDataset,
+        activeSection:   _activeSection,
+        activeSubTab,
+        selectedMonths:  filters.months      || [],
+        selectedProducts: filters.shortNames || [],
+        recordCount:     _allData?.length    || 0,
+        saleoutMonths:   [...new Set((_saleoutData || []).map(r => r.month).filter(Boolean))].sort(),
+        saleoutProducts: [...new Set((_saleoutData || []).map(r => r.short_name).filter(Boolean))].slice(0, 30),
+        tableByProduct:       tableData.byProduct       || [],
+        tableByProductErrors: tableData.byProductByErrors || [],
+        tableByProductSale:   tableData.byProductBySale  || [],
+        tableByMonth:         tableData.byMonth         || [],
+        rawErrorCount:        tableData.rawErrorCount   ?? null,
+        overallRate:          tableData.overallRate     ?? null,
+        tableOrder:           tableData.order           || 'desc',
+        tableTopN:            tableData.topN            || 20,
+      };
+    } catch (_) { return {}; }
+  },
+
+  getAllMonthsData() {
+    try {
+      return SaleOutRenderer.getUnfilteredByMonth?.() || [];
+    } catch (_) { return []; }
+  },
+
+  getDashboardSummary() {
+    try {
+      const data     = _allData || [];
+      const filtered = SlicerService.getFilteredData(data, '__ai__');
+      const slicers  = SlicerService.getAll().filter(s => s.selectedValues.length > 0);
+      const uniqueProducts = [...new Set(data.map(r => r.product_shortname).filter(Boolean))].slice(0, 50);
+      const uniqueMonths   = [...new Set(data.map(r => r.month).filter(Boolean))].sort();
+
+      // Aggregate error breakdowns from filtered records
+      const byCategory  = {}, byAccessory = {}, byCause = {};
+      for (const r of filtered) {
+        if (r.category)      byCategory[r.category]   = (byCategory[r.category]   || 0) + 1;
+        if (r.err_accessory) byAccessory[r.err_accessory] = (byAccessory[r.err_accessory] || 0) + 1;
+        if (r.cause)         byCause[r.cause]         = (byCause[r.cause]         || 0) + 1;
+      }
+      const toRanked = (obj, n) => Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, n).map(([name, count]) => ({ name, count }));
+
+      return {
+        totalCount:      data.length,
+        filteredCount:   filtered.length,
+        uniqueProducts,
+        uniqueMonths,
+        activeSlicers:   slicers.map(s => ({ field: s.field, values: s.selectedValues })),
+        topByCategory:   toRanked(byCategory,  10),  // Nhóm lỗi
+        topByAccessory:  toRanked(byAccessory, 10),  // Linh kiện lỗi
+        topByCause:      toRanked(byCause,     10),  // Nguyên nhân lỗi
+      };
+    } catch (_) { return { totalCount: 0, filteredCount: 0, uniqueProducts: [], uniqueMonths: [], activeSlicers: [], topByCategory: [], topByAccessory: [], topByCause: [] }; }
+  },
+};
 
 // ── Switch dataset context ──────────────────────────────────────────────────
 function switchDataset(ds) {
@@ -13,8 +85,12 @@ function switchDataset(ds) {
   DataService.setNamespace(ds);
   SaleOutService.setNamespace(ds);
   SlicerService.setNamespace(ds);
+  EcnService.setNamespace(ds);
+  SaleOutRenderer.setNamespace(ds); // giữ namespace riêng để save đúng key
   _allData     = ds === 'spm2' ? _spm2Data    : _spm1Data;
   _saleoutData = ds === 'spm2' ? _spm2Saleout : _spm1Saleout;
+  const ecn    = ds === 'spm2' ? _spm2Ecn     : _spm1Ecn;
+  SaleOutRenderer.setEcnMap(EcnService.buildEcnMap(ecn));
 }
 
 // ── SPM2 tab loading badge ───────────────────────────────────────────────
@@ -46,6 +122,7 @@ async function loadData() {
   if (loadingEl) loadingEl.style.display = 'none';
   await DataService.syncViews();
   await DataService.syncSlicers();
+  await DataService.syncSaleoutFilters(); // sync → ghi vào localStorage (không auto-push)
   // Restore namespace
   DataService.setNamespace(_activeDataset);
   _allData = _activeDataset === 'spm2' ? _spm2Data : _spm1Data;
@@ -55,7 +132,12 @@ async function loadData() {
   DashboardRenderer.setData(_allData);
   const dashSection = document.getElementById('dashboard-section');
   if (dashSection && dashSection.style.display !== 'none') DashboardRenderer.render();
+  SaleOutRenderer.setExtraFilters(_soFiltersFromLS('spm1'));
   await loadSaleOutData();
+  // Load ECN data SPM1
+  EcnService.setNamespace('spm1');
+  try { _spm1Ecn = await EcnService.fetchAll(); } catch (_) { _spm1Ecn = []; }
+  SaleOutRenderer.setEcnMap(EcnService.buildEcnMap(_spm1Ecn));
   // Load SPM2 data in background (không block UI)
   _loadSpm2DataBackground();
 }
@@ -65,20 +147,26 @@ async function _loadSpm2DataBackground() {
   _setSpm2TabLoading(true);
   DataService.setNamespace('spm2');
   SaleOutService.setNamespace('spm2');
+  EcnService.setNamespace('spm2');
   try { _spm2Data    = await DataService.fetchAll();    } catch (_) { _spm2Data    = []; }
   try { _spm2Saleout = await SaleOutService.fetchAll(); } catch (_) { _spm2Saleout = []; }
+  try { _spm2Ecn     = await EcnService.fetchAll();     } catch (_) { _spm2Ecn     = []; }
   // Sync views + slicers cho SPM2 (cần gọi trong khi namespace vẫn là spm2)
   await DataService.syncViews();
   await DataService.syncSlicers();
+  await DataService.syncSaleoutFilters(); // sync → ghi vào localStorage (không auto-push)
   _isSpm2Loading = false;
   _setSpm2TabLoading(false);
   // Restore namespace
   DataService.setNamespace(_activeDataset);
   SaleOutService.setNamespace(_activeDataset);
+  EcnService.setNamespace(_activeDataset);
   if (_activeDataset === 'spm2') {
     _allData = _spm2Data;
     _saleoutData = _spm2Saleout;
+    SaleOutRenderer.setEcnMap(EcnService.buildEcnMap(_spm2Ecn));
     updateDataStats();
+    SaleOutRenderer.setExtraFilters(_soFiltersFromLS('spm2'));
     SaleOutRenderer.setData(_saleoutData, _allData);
     const soSection = document.getElementById('saleout-section');
     if (soSection && soSection.style.display !== 'none') SaleOutRenderer.render();
@@ -279,6 +367,7 @@ function setupTabs() {
   }
 
   function activate(which) {
+    _activeSection = which; // track cho ChatbotService
     pivotSection.style.display   = which === 'pivot'     ? 'flex' : 'none';
     dashSection.style.display    = which === 'dashboard' ? ''     : 'none';
     saleoutSection.style.display = which === 'saleout'   ? 'flex' : 'none';
@@ -298,6 +387,8 @@ function setupTabs() {
       if (_activeDataset === 'spm2' && _isSpm2Loading) {
         SaleOutRenderer.setLoading(true);
       } else {
+        // Luôn đọc từ localStorage để có dữ liệu mới nhất (không stale)
+        SaleOutRenderer.setExtraFilters(_soFiltersFromLS(_activeDataset));
         SaleOutRenderer.setData(_saleoutData, _allData);
         SaleOutRenderer.render();
       }
@@ -343,6 +434,8 @@ document.addEventListener('DOMContentLoaded', () => {
   PivotBuilder.init(refreshPivot);
   ImportWizard.init();
   SaleOutImport.init();
+  EcnImport.init();
+  ChatbotUI.init();
   SaleOutRenderer.init();
   setupSavedViewsControls();
   renderSavedViews();
@@ -362,7 +455,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const syncBtn = document.getElementById('btn-sync-views');
   if (syncBtn) {
     syncBtn.addEventListener('click', async () => {
-      if (!DataService.isConfigStoreReady()) {
+      // Kiểm tra ít nhất 1 namespace đã cấu hình
+      DataService.setNamespace('spm1');
+      const spm1Ready = DataService.isConfigStoreReady();
+      DataService.setNamespace('spm2');
+      const spm2Ready = DataService.isConfigStoreReady();
+      DataService.setNamespace(_activeDataset); // restore
+      if (!spm1Ready && !spm2Ready) {
         alert('Chưa cấu hình configTableId trong appConfig.js.\nVào appConfig.js → điền configTableId từ bảng crm_config trên NocoDB.');
         return;
       }
@@ -370,11 +469,20 @@ document.addEventListener('DOMContentLoaded', () => {
       syncBtn.textContent = '⏳ Đang đồng bộ...';
       syncBtn.disabled = true;
       try {
-        const vCount = await DataService.pushViewsToCloud();
-        const sCount = await DataService.pushSlicersToCloud();
-        syncBtn.textContent = `✓ ${vCount} views, ${sCount} slicers`;
+        let totalV = 0, totalS = 0, totalF = 0;
+        // Đồng bộ cả 2 namespace (SPM1 + SPM2)
+        for (const ns of ['spm1', 'spm2']) {
+          DataService.setNamespace(ns);
+          if (!DataService.isConfigStoreReady()) continue; // bỏ qua nếu chưa cấu hình
+          totalV += await DataService.pushViewsToCloud();
+          totalS += await DataService.pushSlicersToCloud();
+          totalF += await DataService.pushSaleoutFiltersToCloud(); // đọc từ localStorage theo namespace
+        }
+        DataService.setNamespace(_activeDataset); // restore
+        syncBtn.textContent = `✓ ${totalV} views, ${totalS} slicers, ${totalF} bộ lọc`;
         setTimeout(() => { syncBtn.textContent = orig; syncBtn.disabled = false; }, 2500);
       } catch (e) {
+        DataService.setNamespace(_activeDataset); // restore dù lỗi
         syncBtn.textContent = '✕ Lỗi — xem Console';
         setTimeout(() => { syncBtn.textContent = orig; syncBtn.disabled = false; }, 3000);
         console.error('[SyncBtn]', e.message, e);
@@ -404,6 +512,21 @@ document.addEventListener('DOMContentLoaded', () => {
         // TLL tab (default)
         ExportService.exportTLL(_allData, _saleoutData, SaleOutRenderer.getFilters(), ds);
       }
+    });
+  }
+
+  // Import ECN button
+  const importEcnBtn = document.getElementById('btn-import-ecn');
+  if (importEcnBtn) {
+    importEcnBtn.addEventListener('click', () => {
+      EcnService.setNamespace(_activeDataset);
+      EcnImport.open(async () => {
+        const updated = await EcnService.fetchAll();
+        if (_activeDataset === 'spm2') _spm2Ecn = updated;
+        else _spm1Ecn = updated;
+        SaleOutRenderer.setEcnMap(EcnService.buildEcnMap(updated));
+        SaleOutRenderer.render();
+      });
     });
   }
 

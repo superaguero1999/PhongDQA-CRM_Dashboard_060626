@@ -41,7 +41,7 @@ const ErrorRateService = (() => {
   }
 
   function getUniqueProducts(saleout) {
-    return [...new Set(saleout.map(r => r.short_name).filter(Boolean))].sort();
+    return [...new Set(saleout.map(r => r.short_name).filter(Boolean))];
   }
 
   // Loc du lieu theo filters = { months: [], shortNames: [] }

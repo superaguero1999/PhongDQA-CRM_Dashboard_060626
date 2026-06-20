@@ -9,6 +9,7 @@ const APP_CONFIG = {
     tableId: 'mg40qyo3y89upf7',          // bảng crm_data (dữ liệu lỗi - thiết kế mới)
     configTableId: 'mgu91jvt242037c',    // bảng crm_config (lưu views/settings - thiết kế mới)
     saleoutTableId: 'm2nki0bw89rgarw',   // bảng crm_saleout (sale out - thiết kế mới)
+    ecnTableId: 'mjge4qnnbmop6ci',          // bảng crm_ecn (ECN history - SPM1)
   },
 
   // ─── NocoDB — dataset 2: tất cả lỗi linh kiện ───────────────────────────
@@ -19,6 +20,15 @@ const APP_CONFIG = {
     tableId: 'masi6jzm85yarvy',          // TODO: bảng crm2_data (danh sách lỗi - tất cả)
     configTableId: 'mluc1hzp92zfp8m',    // TODO: bảng crm2_config (views/settings)
     saleoutTableId: 'mnq65gc7frjz7tv',   // TODO: bảng crm2_saleout (sale out - tất cả)
+    ecnTableId: 'mzh1vopf7vxrg9l',          // bảng crm2_ecn (ECN history - SPM2)
+  },
+
+  // ─── Chatbot AI ─────────────────────────────────────────────────────────
+  chatbot: {
+    geminiApiKey: '',
+    groqApiKey:   '',          // Để trống — key được lưu trong Cloudflare Worker Secrets
+    groqWorkerUrl: 'https://crm-dashboard-groq-key.superaguero1999.workers.dev/',  // Điền URL Cloudflare Worker sau khi tạo
+    enabled: true,
   },
 
   // ─── Row key: tổ hợp fields dùng để identify 1 record (merge logic) ────

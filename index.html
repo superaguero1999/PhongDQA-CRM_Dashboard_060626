@@ -111,9 +111,25 @@
 
     <!-- Sale Out tab sidebar (filters) -->
     <div id="sidebar-saleout" class="flex flex-col flex-1 overflow-hidden" style="display:none">
-      <div class="px-3 py-2 border-b border-gray-100 bg-gray-50 flex-shrink-0">
-        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Bộ lọc</p>
-        <p class="text-xs text-gray-400 mt-0.5">Lọc dữ liệu tỷ lệ lỗi</p>
+      <div class="px-3 py-2 border-b border-gray-100 bg-gray-50 flex items-center justify-between flex-shrink-0">
+        <div>
+          <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Bộ lọc</p>
+          <p class="text-xs text-gray-400 mt-0.5">Lọc dữ liệu tỷ lệ lỗi</p>
+        </div>
+        <div class="relative" data-editor-only style="display:none">
+          <button id="btn-add-so-filter"
+                  class="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors font-medium">
+            + Thêm
+          </button>
+          <div id="add-so-filter-dropdown"
+               class="absolute right-0 top-full mt-1 w-52 bg-white border border-gray-200 rounded-lg shadow-xl z-50 overflow-hidden"
+               style="display:none">
+            <p class="text-xs text-gray-500 px-3 py-2 border-b border-gray-100 font-semibold bg-gray-50">
+              Chọn trường dữ liệu
+            </p>
+            <div id="add-so-filter-field-list" class="max-h-56 overflow-y-auto"></div>
+          </div>
+        </div>
       </div>
       <div id="saleout-sidebar-content" class="overflow-y-auto flex-1 p-2 text-xs text-gray-400 italic">
         Chưa có dữ liệu
@@ -196,11 +212,16 @@
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
           Xuất Excel
         </button>
-        <div data-editor-only style="display:none">
+        <div data-editor-only style="display:none" class="flex items-center gap-2">
           <button id="btn-import-saleout"
                   class="flex items-center gap-1 text-sm px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
             Import Sale Out
+          </button>
+          <button id="btn-import-ecn"
+                  class="flex items-center gap-1 text-sm px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+            Import ECN
           </button>
         </div>
       </div>
@@ -521,11 +542,19 @@
         <h3 id="drilldown-title" class="text-base font-semibold text-gray-800 leading-tight"></h3>
         <span id="drilldown-count" class="text-xs text-gray-500 mt-0.5 block"></span>
       </div>
-      <button id="drilldown-close" class="ml-4 p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-400 hover:text-gray-600 flex-shrink-0">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-        </svg>
-      </button>
+      <div class="flex items-center gap-2 ml-4 flex-shrink-0">
+        <button id="drilldown-export" class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition-colors">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+          </svg>
+          Xuất Excel
+        </button>
+        <button id="drilldown-close" class="p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-400 hover:text-gray-600">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
     </div>
     <!-- Table -->
     <div id="drilldown-table-wrap" class="overflow-auto flex-1 rounded-b-2xl"></div>
@@ -624,6 +653,100 @@
 
 
 <!-- ═══════════════════════════════════════════════════════════════════════
+     ECN IMPORT MODAL
+═══════════════════════════════════════════════════════════════════════ -->
+<div id="ecn-import-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-xl flex flex-col max-h-[90vh]">
+
+    <!-- Header -->
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+      <div class="flex items-center gap-2">
+        <span class="text-purple-600 text-lg">📋</span>
+        <h2 class="text-lg font-semibold text-gray-800">Import dữ liệu ECN</h2>
+      </div>
+      <button id="ecn-import-close-btn" class="p-1 text-gray-400 hover:text-gray-600 rounded">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <!-- Step indicator -->
+    <div class="flex items-center justify-center gap-2 px-6 py-3 border-b border-gray-100">
+      <div class="flex items-center gap-2">
+        <div id="ecn-step-dot-1" class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-purple-600 text-white ring-4 ring-purple-200">1</div>
+        <div class="h-0.5 w-12 bg-gray-200"></div>
+        <div id="ecn-step-dot-2" class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-gray-200 text-gray-500">2</div>
+        <div class="h-0.5 w-12 bg-gray-200"></div>
+        <div id="ecn-step-dot-3" class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-gray-200 text-gray-500">3</div>
+      </div>
+      <div class="ml-3 text-xs text-gray-400 hidden sm:block">Upload → Xem trước → Import</div>
+    </div>
+
+    <!-- Body -->
+    <div class="flex-1 overflow-y-auto px-6 py-4">
+
+      <!-- Step 1: Upload -->
+      <div id="ecn-import-step-1">
+        <p class="text-sm text-gray-600 mb-1">Chọn file Excel chứa dữ liệu ECN (4 cột thẳng đứng):</p>
+        <p class="text-xs text-gray-400 mb-4">Cột: <code class="bg-gray-100 px-1 rounded">model_code</code> · <code class="bg-gray-100 px-1 rounded">ecn_code</code> · <code class="bg-gray-100 px-1 rounded">ecn_name</code> · <code class="bg-gray-100 px-1 rounded">applied_month</code></p>
+        <div id="ecn-import-dropzone"
+             class="border-2 border-dashed border-gray-300 rounded-xl p-10 text-center cursor-pointer hover:border-purple-400 hover:bg-purple-50 transition-colors">
+          <svg class="w-12 h-12 mx-auto text-gray-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+          </svg>
+          <p class="text-gray-500 font-medium">Kéo thả file vào đây hoặc click để chọn</p>
+          <p class="text-xs text-gray-400 mt-1">Hỗ trợ .xlsx, .xls</p>
+          <p id="ecn-import-file-name" class="mt-3 text-sm font-medium text-purple-600"></p>
+        </div>
+        <input id="ecn-import-file-input" type="file" accept=".xlsx,.xls" class="hidden">
+        <div id="ecn-sheet-list" class="mt-4" style="display:none">
+          <p class="text-sm font-medium text-gray-700 mb-2">Chọn sheet chứa dữ liệu:</p>
+          <div id="ecn-sheet-list-items" class="flex flex-col gap-2"></div>
+        </div>
+      </div>
+
+      <!-- Step 2: Preview -->
+      <div id="ecn-import-step-2" style="display:none">
+        <div id="ecn-preview-stats" class="mb-3"></div>
+        <div class="overflow-auto max-h-72 rounded-lg border border-gray-200">
+          <table id="ecn-preview-table" class="w-full text-xs border-collapse"></table>
+        </div>
+      </div>
+
+      <!-- Step 3: Import progress -->
+      <div id="ecn-import-step-3" style="display:none">
+        <p class="text-sm text-gray-600 mb-4">Đang lưu dữ liệu ECN...</p>
+        <div class="rounded-full bg-gray-200 h-3 overflow-hidden mb-2">
+          <div id="ecn-import-progress-bar" class="h-full bg-purple-500 transition-all duration-300 rounded-full" style="width:0%"></div>
+        </div>
+        <p id="ecn-import-progress-text" class="text-sm text-gray-500 text-center"></p>
+        <button id="ecn-import-done-btn"
+                class="mt-4 w-full py-2 bg-purple-600 text-white rounded-lg font-medium hover:bg-purple-700 transition-colors"
+                style="display:none">
+          ✓ Hoàn tất — Đóng
+        </button>
+      </div>
+
+    </div>
+
+    <!-- Footer -->
+    <div class="border-t border-gray-100 px-6 py-3 flex justify-between items-center">
+      <button id="ecn-import-back-btn"
+              class="text-sm px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+              style="display:none">← Quay lại</button>
+      <div class="flex gap-2 ml-auto">
+        <button id="ecn-import-next-btn"
+                class="text-sm px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled>
+          Tiếp theo →
+        </button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════════
      SCRIPTS
 ═══════════════════════════════════════════════════════════════════════ -->
 <script src="assets/js/config/appConfig.js"></script>
@@ -640,10 +763,65 @@
 <script src="assets/js/ui/dashboardRenderer.js"></script>
 <script src="assets/js/services/saleOutService.js"></script>
 <script src="assets/js/services/errorRateService.js"></script>
+<script src="assets/js/services/ecnService.js"></script>
 <script src="assets/js/ui/saleOutImport.js"></script>
+<script src="assets/js/ui/ecnImport.js"></script>
 <script src="assets/js/ui/saleOutRenderer.js"></script>
 <script src="assets/js/services/exportService.js"></script>
+<script src="assets/js/services/chatbotService.js"></script>
+<script src="assets/js/ui/chatbotUI.js"></script>
 <script src="assets/js/main.js"></script>
+
+<!-- ═══════════════════════════════ CHATBOT UI ════════════════════════════ -->
+
+<!-- Floating button -->
+<button id="chatbot-float-btn" title="Trợ lý AI" aria-label="Mở trợ lý AI">
+  💬
+  <span style="
+    position:absolute; top:-4px; right:-5px;
+    background:linear-gradient(135deg,#F59E0B,#EF4444);
+    color:#fff; font-size:9px; font-weight:800;
+    padding:2px 5px; border-radius:8px;
+    letter-spacing:.5px; line-height:1.2;
+    box-shadow:0 2px 6px rgba(239,68,68,.5);
+    animation: ai-badge-pulse 2s ease-in-out infinite;
+  ">!</span>
+</button>
+
+<!-- Chat panel (slide in từ phải) -->
+<div id="chatbot-panel" class="chatbot-closed chatbot-expanded">
+
+  <!-- Header -->
+  <div id="chatbot-header">
+    <span style="font-size:28px;line-height:1">🤖</span>
+    <div style="flex:1;min-width:0">
+      <div style="font-weight:700;font-size:14px">Trợ lý AI</div>
+      <div style="font-size:10px;opacity:.8;white-space:nowrap;letter-spacing:.3px">⚙ ver.1 &nbsp;|&nbsp; 20.06.2026</div>
+    </div>
+    <button id="chatbot-clear-btn" title="Xoá lịch sử" class="chatbot-hdr-btn">🗑</button>
+    <button id="chatbot-expand-btn" title="Thu nhỏ" class="chatbot-hdr-btn">
+      <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="12" y1="1" x2="8" y2="5"/><polyline points="8,2 8,5 11,5"/>
+        <line x1="1" y1="12" x2="5" y2="8"/><polyline points="5,11 5,8 2,8"/>
+      </svg>
+    </button>
+    <button id="chatbot-close-btn" title="Đóng" class="chatbot-hdr-btn" style="font-size:16px">✕</button>
+  </div>
+
+  <!-- Messages -->
+  <div id="chatbot-messages"></div>
+
+  <!-- Suggestion chips -->
+  <div id="chatbot-suggestions"></div>
+
+  <!-- Input row -->
+  <div id="chatbot-input-wrap">
+    <textarea id="chatbot-input" rows="1"
+      placeholder="Hỏi tôi bất cứ điều gì... (Enter để gửi)"></textarea>
+    <button id="chatbot-send-btn" title="Gửi">&#10148;</button>
+  </div>
+
+</div>
 
 </body>
 </html>
