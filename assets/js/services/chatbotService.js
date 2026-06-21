@@ -849,6 +849,9 @@ Ví dụ đầy đủ (bao gồm chuyển tab tự động):
             switched = true;
             break;
           }
+          if (res.status === 403 || res.status === 401) {
+            throw new Error('KEY_INVALID');
+          }
           throw new Error(`Groq API ${res.status}: ${errBody.slice(0, 160)}`);
         }
 
@@ -960,6 +963,9 @@ Ví dụ đầy đủ (bao gồm chuyển tab tự động):
       console.error('[ChatbotService]', err);
       if (err.message === 'ALL_MODELS_EXHAUSTED') {
         return { source: 'error', message: '⛔ Tất cả 6 model AI đã hết hạn mức token ngày (Groq free tier).\n\nQuota reset lúc 0:00 UTC (7:00 sáng giờ VN). Vui lòng thử lại sau.' };
+      }
+      if (err.message === 'KEY_INVALID') {
+        return { source: 'error', message: '⛔ Groq API key không hợp lệ hoặc đã bị thu hồi.\n\nCách fix: Cloudflare Worker → Settings → xóa tất cả biến GROQ_API_KEY cũ → thêm lại key mới dưới dạng Secret → Deploy.' };
       }
       if (err.message.includes('429')) {
         const retryMatch = err.message.match(/try again in (\d+)m/i);

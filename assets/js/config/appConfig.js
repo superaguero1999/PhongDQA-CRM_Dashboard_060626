@@ -27,7 +27,7 @@ const APP_CONFIG = {
   chatbot: {
     geminiApiKey: '',
     groqApiKey:   '',          // Để trống — key được lưu trong Cloudflare Worker Secrets
-    groqWorkerUrl: 'https://crm-dashboard-groq-key.superaguero1999.workers.dev/',  // Điền URL Cloudflare Worker sau khi tạo
+    groqWorkerUrl: 'https://crm-dashboard-dqa-key.superaguero1999.workers.dev/',  // Điền URL Cloudflare Worker sau khi tạo
     enabled: true,
   },
 
