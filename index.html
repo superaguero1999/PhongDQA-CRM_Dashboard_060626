@@ -79,7 +79,7 @@
 <!-- ═══════════════════════════════════════════════════════════════════════
      MAIN LAYOUT
 ═══════════════════════════════════════════════════════════════════════ -->
-<div class="flex h-[calc(100vh-57px)]">
+<div id="main-layout" class="flex h-[calc(100vh-57px)]">
 
   <!-- ── LEFT SIDEBAR ─────────────────────────────────────────────────── -->
   <aside class="w-56 flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-hidden">
@@ -212,6 +212,11 @@
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
           Xuất Excel
         </button>
+        <button id="btn-export-pdf"
+                class="flex items-center gap-1 text-sm px-3 py-1.5 bg-rose-600 text-white rounded-lg hover:bg-rose-700 transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+          Xuất PDF
+        </button>
         <div data-editor-only style="display:none" class="flex items-center gap-2">
           <button id="btn-import-saleout"
                   class="flex items-center gap-1 text-sm px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors">
@@ -225,6 +230,12 @@
           </button>
         </div>
       </div>
+    </div>
+
+    <!-- Print-only title block (hidden on screen, shown in @media print) -->
+    <div id="print-title" style="display:none" class="px-4 py-3 border-b border-gray-200 bg-white">
+      <h1 id="print-title-text" class="text-lg font-bold text-gray-800">CRM Dashboard — Báo cáo tỷ lệ lỗi</h1>
+      <p id="print-title-sub" class="text-sm text-gray-500 mt-0.5"></p>
     </div>
 
     <!-- Pivot section -->

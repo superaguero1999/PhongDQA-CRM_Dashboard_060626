@@ -4,19 +4,26 @@ const ChatbotService = (() => {
   let _history = [];
   let _lastProductFilterError = null; // flag cho read_dashboard_groups biết filter_product có thất bại không
   let _disambiguateCallback   = null; // callback để UI hiện disambiguation popup khi có nhiều match
-  let _groqKeyDirect = null;          // key load từ NocoDB, dùng để gọi Groq trực tiếp từ browser
+  let _groqKeyDirect   = null;         // key load từ NocoDB, dùng để gọi Groq trực tiếp từ browser
+  let _geminiKeyDirect = null;         // key load từ NocoDB, dùng để gọi Gemini trực tiếp từ browser
 
   // Track filter state trong chatbot — phòng trường hợp SaleOutRenderer bị reset async
   let _chatbotMonths   = [];  // months đã set bởi filter_month trong turn hiện tại
   let _chatbotProducts = [];  // products đã set bởi filter_product
+  let _lastUserText    = '';  // user message của turn hiện tại — dùng để auto-correct args khi AI nhỏ sai
 
-  // Load Groq key từ NocoDB config table (chạy 1 lần khi app khởi động)
+  // Load API keys từ NocoDB config table (chạy 1 lần khi app khởi động)
   async function loadKey() {
     try {
-      const stored = await DataService.configGet('groq_api_key');
-      if (stored && typeof stored === 'string' && stored.length > 20) {
-        _groqKeyDirect = stored;
+      const groqStored = await DataService.configGet('groq_api_key');
+      if (groqStored && typeof groqStored === 'string' && groqStored.length > 20) {
+        _groqKeyDirect = groqStored;
         console.log('[ChatbotService] Groq key loaded from NocoDB');
+      }
+      const geminiStored = await DataService.configGet('gemini_api_key');
+      if (geminiStored && typeof geminiStored === 'string' && geminiStored.length > 20) {
+        _geminiKeyDirect = geminiStored;
+        console.log('[ChatbotService] Gemini key loaded from NocoDB');
       }
     } catch (e) {
       console.warn('[ChatbotService] Không load được key từ NocoDB:', e.message);
@@ -131,7 +138,12 @@ const ChatbotService = (() => {
   }
 
   async function _execFilterProduct({ query }) {
-    const q = (query || '').toLowerCase().trim();
+    // Strip Vietnamese product prefixes mà AI nhỏ hay gửi kèm ("máy S688" → "S688")
+    const _stripPrefixes = (s) => s
+      .replace(/^(?:máy|model\s+|sản phẩm\s+|sp\s+|thiết bị\s+|dòng\s+|loại\s+)/i, '')
+      .trim();
+    const raw = (query || '').toLowerCase().trim();
+    const q   = _stripPrefixes(raw);
     if (!q) return 'Vui lòng chỉ định tên hoặc mã sản phẩm cụ thể';
 
     if (_isDashboard()) {
@@ -160,7 +172,7 @@ const ChatbotService = (() => {
     // SaleOut tab: dùng pill DOM, cũng hỗ trợ disambiguation
     const pills = [...document.querySelectorAll('.so-pill[data-type="product"]')]
       .filter(p => (p.dataset.value || '').toLowerCase().includes(q));
-    if (!pills.length) return `Không tìm thấy sản phẩm khớp với "${query}" trong dữ liệu hiện tại`;
+    if (!pills.length) return `Không tìm thấy sản phẩm khớp với "${q}" trong dữ liệu hiện tại`;
     let pill = pills[0];
     if (pills.length > 1 && typeof _disambiguateCallback === 'function') {
       const chosenName = await new Promise(resolve =>
@@ -175,6 +187,7 @@ const ChatbotService = (() => {
     if (current.length === 0) next = [productName];
     else if (current.includes(productName)) next = current.filter(v => v !== productName);
     else next = [...current, productName];
+    _chatbotProducts = next; // track để re-apply nếu SaleOutRenderer.setData() reset async
     SaleOutRenderer.setProductFilter(next);
     _spawnRipple(pill);
     _showActionLabel(pill, `AI: Chọn sản phẩm "${productName}"`);
@@ -382,9 +395,12 @@ const ChatbotService = (() => {
 
       if (!allByMonth.length) return 'Không có dữ liệu tháng để phân tích';
 
+      // Ưu tiên: months param → filter đang bật → tất cả tháng
       const targets = Array.isArray(months) && months.length
         ? months.filter(m => allByMonth.some(r => r.month === m))
-        : allByMonth.map(r => r.month);
+        : savedMonths.length
+          ? savedMonths.filter(m => allByMonth.some(r => r.month === m)).sort()
+          : allByMonth.map(r => r.month);
 
       if (!targets.length) return `Không tìm thấy dữ liệu cho tháng: ${(months || []).join(', ')}`;
 
@@ -452,9 +468,143 @@ const ChatbotService = (() => {
     } catch (err) { return `Không phân tích được xu hướng: ${err.message}`; }
   }
 
-  // Đọc bảng nhóm lỗi / linh kiện lỗi / nguyên nhân từ dashboard SAU KHI filter đã áp dụng
+  // Lọc dashboard theo nhiều giá trị (OR logic) — dùng cho range query Time_sudung
+  async function _execFilterFieldRange({ field, values }) {
+    if (!_isDashboard()) { await _execSwitchSubTab({ tab: 'dashboard' }); await _delay(300); }
+    const allVals = window.AppState?.getAllFieldValues?.(field) || [];
+    const LABELS = { category: 'nhóm lỗi', err_accessory: 'linh kiện lỗi', cause: 'nguyên nhân', Time_sudung: 'mốc thời gian sử dụng' };
+    // Normalize: bỏ khoảng trắng xung quanh dấu gạch ngang ("6- 12" → "6-12")
+    const norm = s => s.toLowerCase().replace(/\s*-\s*/g, '-').trim();
+    const matched = [];
+    for (const val of values) {
+      const q = norm(String(val));
+      const m = allVals.find(v => norm(v) === q) ||
+                allVals.find(v => norm(v).includes(q)) ||
+                allVals.find(v => q.includes(norm(v)));
+      if (m && !matched.includes(m)) matched.push(m);
+    }
+    if (!matched.length) return `Không tìm thấy giá trị nào trong ${LABELS[field] || field}`;
+    SlicerService.setFieldFilter(field, matched);
+    DashboardRenderer?.render?.();
+    await _delay(300);
+    const verify = window.AppState?.getDashboardSummary?.() || {};
+    return `Đã lọc theo ${LABELS[field] || field}: ${matched.join(', ')} (${verify.filteredCount || 0} bản ghi)`;
+  }
+
+  // Lọc dashboard theo giá trị cụ thể của 1 field (category, err_accessory, cause, v.v.)
+  async function _execFilterField({ field, value }) {
+    if (!field || !value) return 'Thiếu field hoặc value để lọc';
+    // Support array value cho range queries (e.g. Time_sudung nhiều mốc)
+    if (Array.isArray(value)) return _execFilterFieldRange({ field, values: value });
+    if (!_isDashboard()) {
+      await _execSwitchSubTab({ tab: 'dashboard' });
+      await _delay(300);
+    }
+    const q = String(value).toLowerCase().trim();
+    const dash = window.AppState?.getDashboardSummary?.() || {};
+    // Top-N results (nhanh, ưu tiên dùng trước)
+    const FIELD_TOP = {
+      category:      (dash.topByCategory  || []).map(r => r.name),
+      err_accessory: (dash.topByAccessory || []).map(r => r.name),
+      cause:         (dash.topByCause     || []).map(r => r.name),
+      Time_sudung:   [],
+    };
+    // ALL unique values — dùng khi top-N không đủ (ví dụ: giá trị hiếm không vào top 10)
+    const FIELD_ALL = {
+      category:      window.AppState?.getAllFieldValues?.('category')      || [],
+      err_accessory: window.AppState?.getAllFieldValues?.('err_accessory') || [],
+      cause:         window.AppState?.getAllFieldValues?.('cause')         || [],
+      Time_sudung:   window.AppState?.getAllFieldValues?.('Time_sudung')   || [],
+    };
+    const FIELD_LABELS = { category: 'nhóm lỗi', err_accessory: 'linh kiện lỗi', cause: 'nguyên nhân', Time_sudung: 'mốc thời gian sử dụng' };
+
+    const _norm = s => s.toLowerCase().replace(/\s*-\s*/g, '-').trim();
+    const _qn = _norm(q);
+    // Tìm TẤT CẢ candidates khớp (dùng cho field chính — để disambiguate)
+    const _findAll = (candidates) => {
+      const exact   = candidates.filter(v => _norm(v) === _qn);
+      const partial = candidates.filter(v => !exact.includes(v) &&
+        (_norm(v).includes(_qn) || _qn.includes(_norm(v))));
+      return [...exact, ...partial];
+    };
+    // Tìm match đầu tiên (dùng cho fallback fields — không cần popup)
+    const _findIn = (candidates) =>
+      candidates.find(v => _norm(v) === _qn) ||
+      candidates.find(v => _norm(v).includes(_qn)) ||
+      candidates.find(v => _qn.includes(_norm(v)));
+
+    // Thứ tự thử: field AI chỉ định trước, sau đó category → err_accessory → cause
+    const SEARCH_ORDER = [field, ...['category', 'err_accessory', 'cause'].filter(f => f !== field)];
+
+    for (const tryField of SEARCH_ORDER) {
+      let match;
+
+      if (tryField === field) {
+        // Field chính: tìm TẤT CẢ candidates, disambiguate nếu nhiều hơn 1
+        const allVals = [...new Set([...(FIELD_TOP[tryField] || []), ...(FIELD_ALL[tryField] || [])])];
+        const candidates = _findAll(allVals);
+        if (!candidates.length) continue;
+
+        if (candidates.length > 1 && typeof _disambiguateCallback === 'function') {
+          match = await new Promise(resolve => _disambiguateCallback({ candidates, resolve }));
+          if (!match) return 'Đã huỷ — không chọn giá trị';
+        } else {
+          match = candidates[0];
+        }
+      } else {
+        // Fallback fields: chỉ lấy match đầu tiên, không popup
+        match = _findIn(FIELD_TOP[tryField] || []) || _findIn(FIELD_ALL[tryField] || []);
+      }
+
+      if (!match) continue;
+
+      // Áp filter và kiểm tra kết quả thực tế
+      SlicerService.setFieldFilter(tryField, [match]);
+      DashboardRenderer?.render?.();
+      await _delay(300);
+
+      const verify = window.AppState?.getDashboardSummary?.() || {};
+      if ((verify.filteredCount || 0) > 0) {
+        const label = FIELD_LABELS[tryField] || tryField;
+        const note = tryField !== field
+          ? ` (tự động sửa: "${FIELD_LABELS[field] || field}" → "${label}" vì có dữ liệu ở đây)`
+          : '';
+        return `Đã lọc dashboard theo ${label}: "${match}"${note}`;
+      }
+
+      // 0 kết quả → clear field này, thử field tiếp theo
+      SlicerService.setFieldFilter(tryField, []);
+      DashboardRenderer?.render?.();
+      await _delay(100);
+    }
+
+    // Không field nào có dữ liệu
+    const avail = [
+      FIELD_TOP.category.length      ? `Nhóm lỗi: ${FIELD_TOP.category.slice(0, 6).join(', ')}` : '',
+      FIELD_TOP.err_accessory.length ? `Linh kiện: ${FIELD_TOP.err_accessory.slice(0, 6).join(', ')}` : '',
+      FIELD_TOP.cause.length         ? `Nguyên nhân: ${FIELD_TOP.cause.slice(0, 4).join(', ')}` : '',
+    ].filter(Boolean).join('\n');
+    return `Không tìm thấy "${value}" trong dữ liệu hiện tại.\n${avail || 'Không có dữ liệu với filter hiện tại.'}`;
+  }
+
+  // Đọc bảng nhóm lỗi / linh kiện lỗi / nguyên nhân / model từ dashboard SAU KHI filter đã áp dụng
   async function _execReadDashboardGroups({ by, limit }) {
     try {
+      // Auto-switch về dashboard tab nếu AI đã gọi sai tab trước đó
+      if (!_isDashboard()) await _execSwitchSubTab({ tab: 'dashboard' });
+
+      // Auto-correct 'by' dựa vào user text thực tế — tránh AI 8B chọn sai parameter
+      const uLower = _lastUserText.toLowerCase();
+      if (/linh kiện|linh_kien|phụ kiện|phụ tùng|accessory|bộ phận/.test(uLower)) {
+        by = 'accessory';
+      } else if (/nguyên nhân|nguyen nhan|\bcause\b|lý do lỗi|tại sao lỗi/.test(uLower)
+                 && !/model nào|sp nào|sản phẩm nào|máy nào/.test(uLower)) {
+        by = 'cause';
+      } else if (/model nào|sp nào|sản phẩm nào|máy nào|by=product/.test(uLower)) {
+        by = 'product';
+      }
+      // else giữ nguyên by do AI trả về (thường là 'category')
+
       if (_lastProductFilterError) {
         const q = _lastProductFilterError;
         _lastProductFilterError = null;
@@ -472,6 +622,9 @@ const ChatbotService = (() => {
       } else if (by === 'cause' || by === 'nguyen_nhan') {
         rows  = (dash.topByCause || []).slice(0, n);
         label = 'Nguyên nhân lỗi';
+      } else if (by === 'product' || by === 'model') {
+        rows  = (dash.topByProduct || []).slice(0, n);
+        label = 'Model/Sản phẩm';
       } else {
         rows  = (dash.topByCategory || []).slice(0, n);
         label = 'Nhóm lỗi';
@@ -583,6 +736,7 @@ const ChatbotService = (() => {
     read_top_products:    _execReadTopProducts,
     read_dashboard_groups: _execReadDashboardGroups,
     read_saleout_table:    _execReadSaleoutTable,
+    filter_field:          _execFilterField,
   };
 
   // Tạo system message kèm dữ liệu thực từ dashboard
@@ -673,10 +827,12 @@ const ChatbotService = (() => {
         `Slicer đang bật: ${slicerInfo}`,
         `Tháng có dữ liệu: ${(dash.uniqueMonths || []).join(', ')}`,
         `Sản phẩm: ${(dash.uniqueProducts || []).slice(0, 12).join(', ')}`,
-        dash.topByCategory?.length  ? `\nNHÓM LỖI (category): ${fmtGroup(dash.topByCategory)}`  : '',
-        dash.topByAccessory?.length ? `LINH KIỆN LỖI (err_accessory): ${fmtGroup(dash.topByAccessory)}` : '',
-        dash.topByCause?.length     ? `NGUYÊN NHÂN (cause): ${fmtGroup(dash.topByCause)}`       : '',
-        '\nLưu ý: Dữ liệu trên là snapshot KHI BUILD system message. Gọi read_dashboard_groups để lấy số liệu MỚI NHẤT sau filter.',
+        dash.topByCategory?.length  ? `\nNHÓM LỖI = field "category" (dùng field="category" khi filter_field): ${fmtGroup(dash.topByCategory)}`  : '',
+        dash.topByAccessory?.length ? `LINH KIỆN LỖI = field "err_accessory": ${fmtGroup(dash.topByAccessory)}` : '',
+        dash.topByCause?.length     ? `NGUYÊN NHÂN = field "cause": ${fmtGroup(dash.topByCause)}`       : '',
+        (() => { const vals = window.AppState?.getAllFieldValues?.('Time_sudung') || []; return vals.length ? `MỐC THỜI GIAN SỬ DỤNG = field "Time_sudung": ${vals.join(', ')}` : ''; })(),
+        '\n⚠️ filter_field: dùng đúng field. "Bơm/Nguồn/Lọc/Dây điện/Đường nước/Mạch điện" là NHÓM LỖI → field="category". Tên linh kiện cụ thể → field="err_accessory". "dưới 1 tháng/từ X tháng/từ X năm" → field="Time_sudung". Hệ thống tự sửa nếu sai, nhưng hãy chọn đúng.',
+        'Lưu ý: Dữ liệu trên là snapshot KHI BUILD system message. Gọi read_dashboard_groups để lấy số liệu MỚI NHẤT sau filter.',
         'filter_month/filter_product sẽ cập nhật slicer dashboard. sum_rate không dùng được ở đây.',
       ].filter(Boolean).join('\n');
       return SYSTEM_INSTRUCTION + '\n\n=== THỜI GIAN THỰC ===\n' + _timeCtx
@@ -735,11 +891,18 @@ const ChatbotService = (() => {
         by:    { type: 'string', enum: ['errors', 'rate', 'sale'], description: 'Xếp theo: errors=lỗi nhiều nhất, rate=TLL% cao nhất, sale=saleout nhiều nhất' },
       }, required: ['by'] } },
     { name: 'read_dashboard_groups',
-      description: 'Đọc xếp hạng nhóm lỗi/linh kiện/nguyên nhân từ Dashboard tab SAU KHI filter. by=category: nhóm lỗi; by=accessory: linh kiện lỗi; by=cause: nguyên nhân lỗi.',
+      description: 'Đọc xếp hạng nhóm lỗi/linh kiện/nguyên nhân/model từ Dashboard tab SAU KHI filter. by=category: nhóm lỗi; by=accessory: linh kiện lỗi; by=cause: nguyên nhân lỗi; by=product: model/SP nhiều lỗi nhất.',
       parameters: { type: 'object', properties: {
-        by:    { type: 'string', enum: ['category', 'accessory', 'cause'], description: 'Loại nhóm cần đọc' },
+        by:    { type: 'string', enum: ['category', 'accessory', 'cause', 'product'], description: 'Loại nhóm cần đọc. by=product để xem model nào nhiều lỗi nhất.' },
         limit: { type: 'number', description: 'Số nhóm hiển thị (mặc định 10)' },
       }, required: ['by'] } },
+    { name: 'filter_field',
+      description: 'Lọc dashboard theo giá trị cụ thể của 1 field. Dùng khi user hỏi "lỗi X thuộc model nào". Hệ thống tự động tìm field đúng nếu AI chọn sai. field="category" cho nhóm lỗi rộng (Bơm, Nguồn, Lọc, Dây điện, Đường nước...), field="err_accessory" cho tên linh kiện cụ thể, field="cause" cho nguyên nhân.',
+      parameters: { type: 'object', properties: {
+        field: { type: 'string', enum: ['category', 'err_accessory', 'cause', 'region', 'err_classify'],
+          description: 'category=nhóm lỗi rộng (Bơm/Nguồn/Lọc/Dây điện...) | err_accessory=tên linh kiện cụ thể | cause=nguyên nhân (người dùng/thiết kế...)' },
+        value: { type: 'string', description: 'Giá trị cần lọc, VD: "Bơm", "Nguồn", "Lỗi lọc". Dùng đúng tên từ dữ liệu dashboard.' },
+      }, required: ['field', 'value'] } },
     { name: 'read_saleout_table',
       description: 'Đọc dữ liệu Sale Out thực (sale + lỗi + TLL%) theo năm hoặc dải tháng. LUÔN dùng tool này khi hỏi về dữ liệu saleout, tổng bán ra. KHÔNG tự tính.',
       parameters: { type: 'object', properties: {
@@ -748,83 +911,159 @@ const ChatbotService = (() => {
       } } },
   ];
 
-  const SYSTEM_INSTRUCTION = `Bạn là trợ lý AI điều khiển dashboard CRM phân tích lỗi sản phẩm Karofi. Luôn trả lời bằng JSON hợp lệ:
-{"actions":[...],"reply":"..."}
+  const SYSTEM_INSTRUCTION = `Bạn là trợ lý AI điều khiển CRM Dashboard phân tích lỗi sản phẩm Karofi.
+LUÔN trả lời bằng JSON hợp lệ: {"actions":[...],"reply":"..."}
 
-TAB CHÍNH (tự động chuyển tab là ACTION ĐẦU TIÊN, trừ khi đang đúng tab rồi):
-- switch_sub_tab(rate): tỷ lệ lỗi, TLL%, xu hướng, so sánh tháng, sale out
-- switch_sub_tab(data): tổng lỗi, bảng đầy đủ, bao nhiêu bản ghi
-- switch_sub_tab(dashboard): nhóm lỗi, nguyên nhân lỗi, linh kiện lỗi, phân loại, biểu đồ
-CHI TIẾT LỖI / NHÓM LỖI của 1 SP → dashboard + filter_product + read_dashboard_groups (KHÔNG chỉ sum_errors)
+═══ BẢNG CHỌN TAB (action ĐẦU TIÊN) ════════════════════════════
+switch_sub_tab tab="rate"      → tỷ lệ lỗi, TLL%, xu hướng, saleout
+switch_sub_tab tab="data"      → tổng lỗi, bao nhiêu lỗi, đếm lỗi
+switch_sub_tab tab="dashboard" → nhóm lỗi, LINH KIỆN lỗi, nguyên nhân, biểu đồ
 
-ACTIONS:
-{"name":"switch_main_tab","args":{"tab":"spm1|spm2"}} — CHỈ khi user nói rõ SPM1/SPM2/chuyển dataset
-{"name":"switch_sub_tab","args":{"tab":"rate|data|pivot|dashboard"}}
-{"name":"filter_product","args":{"query":"tên SP"}}
-{"name":"filter_month","args":{"month":"Y2507"}} hoặc {"month":"Y2507,Y2508,Y2509"}
+═══ PHÂN BIỆT BẮT BUỘC ════════════════════════════════════════
+"tỷ lệ lỗi / TLL% / lỗi %"          → sum_rate
+"bao nhiêu lỗi / tổng lỗi / đếm lỗi" → sum_errors  ← KHÔNG dùng sum_rate
+
+═══ read_dashboard_groups — CHỌN by ĐÚNG ══════════════════════
+by="accessory" ← HỎI VỀ LINH KIỆN: "linh kiện / phụ kiện / bộ phận / accessory"
+by="category"  ← HỎI VỀ NHÓM LỖI: "nhóm lỗi / loại lỗi / Bơm/Nguồn/Lọc"
+by="cause"     ← HỎI VỀ NGUYÊN NHÂN: "nguyên nhân / lý do / cause"
+by="product"   ← HỎI VỀ MODEL: "model nào / sản phẩm nào / máy nào"
+⚠️ LUÔN gọi clear_filters trước read_dashboard_groups
+
+═══ filter_field — CHỌN field ĐÚNG ════════════════════════════
+field="category"     → "Bơm", "Nguồn", "Lọc", "Dây điện", "Đường nước", "Mạch điện"... (nhóm rộng)
+field="err_accessory"→ tên linh kiện vật lý cụ thể
+field="cause"        → "khách quan sử dụng", "lỗi thiết kế", "lỗi sản xuất"...
+field="Time_sudung"  → mốc thời gian sử dụng: "dưới 1 tháng", "từ 2-3 tháng", "từ 3-6 tháng", "từ 6-12 tháng", "từ 1-2 năm"...
+                    Thứ tự các mốc tăng dần: dưới 1 tháng → từ 2-3 tháng → từ 3-6 tháng → từ 6-12 tháng → từ 1-2 năm
+                    QUY TẮC RANGE: "dưới X" = NHỎ HƠN HOẶC BẰNG X (≤ X, không phải < X)
+                    → "từ 6-12 tháng" kết thúc tại 12 tháng = 1 năm → nằm trong "dưới 1 năm" ✅
+                    → "từ 1-2 năm" kết thúc tại 2 năm → nằm trong "dưới 2 năm" ✅
+                    Khi user hỏi KHOẢNG → value là MẢNG TẤT CẢ mốc có giá trị cuối ≤ ngưỡng:
+                    "dưới 3 tháng"       → ["dưới 1 tháng","từ 2-3 tháng"]
+                    "dưới 6 tháng"       → ["dưới 1 tháng","từ 2-3 tháng","từ 3-6 tháng"]
+                    "dưới 1 năm/12 tháng"→ ["dưới 1 tháng","từ 2-3 tháng","từ 3-6 tháng","từ 6-12 tháng"]  ← bao gồm "từ 6-12 tháng"!
+                    "dưới 2 năm/24 tháng"→ ["dưới 1 tháng","từ 2-3 tháng","từ 3-6 tháng","từ 6-12 tháng","từ 1-2 năm"]  ← tất cả 5 mốc!
+                    "trên 6 tháng"       → ["từ 6-12 tháng","từ 1-2 năm"]
+                    "từ 3-12 tháng"      → ["từ 3-6 tháng","từ 6-12 tháng"]
+
+═══ ĐỊNH DẠNG THÁNG ════════════════════════════════════════════
+Format: Y + 2 chữ NĂM + 2 chữ THÁNG
+"07/2026"→Y2607 | "07/2025"→Y2506 | "năm 2025"→"2025" | "năm 2026"→"2026"
+Q1=01-03, Q2=04-06, Q3=07-09, Q4=10-12
+
+═══ ACTIONS ════════════════════════════════════════════════════
+{"name":"switch_sub_tab","args":{"tab":"rate|data|dashboard"}}
+{"name":"switch_main_tab","args":{"tab":"spm1|spm2"}}   ← CHỈ khi user nói rõ SPM1/SPM2
 {"name":"clear_filters","args":{}}
-{"name":"set_top_n","args":{"n":10}} — CHỈ khi user nói "top N"
-{"name":"set_sort_order","args":{"order":"desc|asc"}} — CHỈ khi user yêu cầu rõ
-{"name":"set_chart_type","args":{"type":"bar|line|area|pie|doughnut"}}
-{"name":"sum_errors","args":{}} — tổng lỗi SAU filter, reply:""
-{"name":"sum_rate","args":{}} — TLL% SAU filter, gọi cuối, reply:""
-{"name":"read_top_products","args":{"by":"errors|rate|sale","limit":10}} — xếp hạng SP SAU filter
-{"name":"read_dashboard_groups","args":{"by":"category|accessory|cause","limit":10}} — nhóm lỗi SAU filter
-{"name":"read_saleout_table","args":{"year":2025}} | {"args":{"months":["Y2501","Y2502"]}} | {"args":{}}
-{"name":"analyze_trend","args":{"months":["Y2603","Y2604"]}} — xu hướng, bất thường, MoM, KHÔNG cần clear_filters
+{"name":"filter_month","args":{"month":"Y2507"}}        ← hoặc "Y2501,Y2502,..." hoặc "2025"
+{"name":"filter_product","args":{"query":"tên SP"}}
+{"name":"filter_field","args":{"field":"category","value":"Bơm"}}
+{"name":"filter_field","args":{"field":"Time_sudung","value":["dưới 1 tháng","từ 2-3 tháng"]}}  ← khi lọc KHOẢNG
+{"name":"sum_errors","args":{}}
+{"name":"sum_rate","args":{}}
+{"name":"read_top_products","args":{"by":"errors|rate|sale","limit":10}}
+{"name":"read_dashboard_groups","args":{"by":"category|accessory|cause|product","limit":10}}
+{"name":"read_saleout_table","args":{"year":2025}}
+{"name":"analyze_trend","args":{"months":["Y2603","Y2604"]}}
 
-MONTH FORMAT: Y + 2 số NĂM + 2 số THÁNG. 2025→25, 2026→26
-User có thể dùng nhiều cách viết — tất cả đều convert sang Ymmyy:
-"07/2026"→Y2607 | "07-2026"→Y2607 | "07.2026"→Y2607 | "tháng 7/2026"→Y2607 | "tháng 7 năm 2026"→Y2607
-"7/2026"→Y2607 | "7-2026"→Y2607 | "2026/07"→Y2607 | "2026-07"→Y2607
-⛔ Khi user nói rõ năm → dùng đúng năm đó. "06/2025"→Y2506 (KHÔNG phải Y2606 dù năm hiện tại là 2026)
-Dải tháng: "08/2025 đến 02/2026"="Y2508,Y2509,Y2510,Y2511,Y2512,Y2601,Y2602"
-Cả năm: "năm 2026" → filter_month("2026") [hệ thống tự expand thành 12 tháng Y2601..Y2612]
-Cả năm: "năm 2025" → filter_month("2025") [tương tự, expand Y2501..Y2512]
-Quý: Q1=01-03, Q2=04-06, Q3=07-09, Q4=10-12
+═══ RULES QUAN TRỌNG ═══════════════════════════════════════════
+1. KHÔNG tự bịa số liệu — PHẢI gọi tool để lấy số thực. KHÔNG mô tả các bước.
+2. Mỗi câu hỏi ĐỘC LẬP — clear_filters trước filter mới.
+3. Hỏi saleout/bán ra → LUÔN read_saleout_table, KHÔNG tự tính.
+4. TOP SẢN PHẨM trong context = snapshot chưa lọc, KHÔNG dùng khi user hỏi theo năm/tháng.
+5. "tháng này" = tháng hiện tại (xem THỜI GIAN THỰC trong context). "năm nay" = 2026.
+6. LUÔN trả lời bằng JSON với actions. KHÔNG trả lời bằng văn xuôi mô tả bước.
 
-⛔ KHÔNG TỰ TẠO SỐ LIỆU: hỏi saleout/bán ra → LUÔN gọi read_saleout_table. KHÔNG tự tính.
-⛔ CẤM: switch_main_tab (trừ SPM1/SPM2 rõ ràng) | set_top_n (trừ "top N") | set_sort_order (trừ yêu cầu rõ)
+═══ VÍ DỤ CHUẨN (làm theo đúng thứ tự này) ════════════════════
+"tỷ lệ lỗi tháng 6/2026"
+→ switch_sub_tab(rate) + clear_filters + filter_month(Y2606) + sum_rate
 
-QUAN TRỌNG:
-- Bạn có DỮ LIỆU THỰC. Trả lời trực tiếp, KHÔNG bảo user "xem bảng".
-- TOP SẢN PHẨM trong system = snapshot CHƯA lọc. KHÔNG quote những con số đó khi user hỏi theo năm/tháng cụ thể.
-- Khi hỏi xếp hạng SP theo năm/tháng → PHẢI filter_month trước, rồi read_top_products → KHÔNG tự trả lời từ snapshot.
-- Câu hỏi có "model X" / "SP X" kèm phân tích → filter_product("X") TRƯỚC analyze_trend/filter_month.
-- filter_product PHẢI đứng TRƯỚC read_saleout_table.
-- Mỗi câu hỏi ĐỘC LẬP. clear_filters trước filter mới (trừ analyze_trend).
-- KHÔNG tự tính từ BẢNG THÁNG. Dùng tools: sum_errors/sum_rate/analyze_trend/read_top_products.
-- Hỏi tiếp về năm/tháng sau câu saleout → gọi read_saleout_table, KHÔNG chỉ filter_month.
+"tổng lỗi / bao nhiêu lỗi tháng 6/2026"
+→ switch_sub_tab(data) + clear_filters + filter_month(Y2606) + sum_errors
 
-Ví dụ:
-"tỷ lệ lỗi tháng 6/2026"→switch_sub_tab(rate)+clear_filters+filter_month(Y2606)+sum_rate
-"tổng lỗi tháng 6/2026"→switch_sub_tab(data)+clear_filters+filter_month(Y2606)+sum_errors
-"nhóm lỗi nhiều nhất"→switch_sub_tab(dashboard)+read_dashboard_groups(by=category)
-"model nào TLL% tệ nhất năm 2026"→switch_sub_tab(rate)+clear_filters+filter_month("2026")+read_top_products(by=rate,n=10), reply="Xếp hạng TLL% năm 2026:"
-"model nào lỗi nhiều nhất năm 2025"→switch_sub_tab(rate)+clear_filters+filter_month("2025")+read_top_products(by=errors,n=10), reply="Xếp hạng lỗi nhiều nhất năm 2025:"
-"xếp hạng model tệ nhất năm nay"→switch_sub_tab(rate)+clear_filters+filter_month("2026")+read_top_products(by=rate,n=10), reply="Xếp hạng TLL% năm 2026:"
-"chi tiết lỗi S88"→switch_sub_tab(dashboard)+clear_filters+filter_product("S88")+read_dashboard_groups(by=category)
-"u50k lỗi gì nhiều"→switch_sub_tab(dashboard)+clear_filters+filter_product("u50k")+read_dashboard_groups(by=category)
-"KAQ-U50K có lỗi nào"→switch_sub_tab(dashboard)+clear_filters+filter_product("KAQ-U50K")+read_dashboard_groups(by=category)
-"xu hướng TLL% 3 tháng gần nhất"→switch_sub_tab(rate)+filter_month(3 tháng cuối)+analyze_trend
-"SP S66 xu hướng lỗi 2025"→switch_sub_tab(rate)+clear_filters+filter_product("S66")+filter_month("Y2501,...,Y2512")+analyze_trend
-"dữ liệu saleout năm 2025"→switch_sub_tab(rate)+read_saleout_table({year:2025}), reply=""
-"S66 saleout tháng 7/2025"→switch_sub_tab(rate)+clear_filters+filter_product("S66")+read_saleout_table({months:["Y2507"]}), reply=""
-"Q1 2025 bao nhiêu lỗi"→switch_sub_tab(data)+clear_filters+filter_month("Y2501,Y2502,Y2503")+sum_errors, reply=""
-"model nào lỗi nhiều nhất"(toàn kỳ)→switch_sub_tab(data)+clear_filters+read_top_products(by=errors), reply=""
-"tháng nào sale nhiều nhất"→switch_sub_tab(rate)+read_saleout_table({}), reply="📌 Tháng X/Y có sale cao nhất: Z units" (đọc từ BẢNG THÁNG trong context, chỉ gọi tool nếu cần thêm data)
-"tháng nào TLL% cao nhất/thấp nhất"→switch_sub_tab(rate)+read_saleout_table({}), reply="📌 Tháng X/Y có TLL% cao nhất/thấp nhất: Z%"
-"SP nào sale nhiều nhất"→switch_sub_tab(rate)+read_top_products(by=sale), reply="📌 SP X có sale cao nhất: Z units"
-"hi"→{"actions":[],"reply":"Xin chào! Tôi có thể lọc, phân tích xu hướng, hoặc trả lời câu hỏi về số liệu."}
+"năm 2025 có bao nhiêu lỗi / tổng lỗi năm 2025"
+→ switch_sub_tab(data) + clear_filters + filter_month("2025") + sum_errors
 
-DẠng câu hỏi "cái nào nhiều/ít nhất": LUÔN đặt câu trả lời trực tiếp vào reply (VD: "📌 Tháng 01/2026 có sale cao nhất: 6047"). Tool result là chi tiết bổ sung.
-Năm không hợp lệ (1015, 3000...)→KHÔNG gọi tools, reply giải thích. Tháng không tồn tại→reply hỏi lại.`;
+"tổng lỗi tháng này / tháng hiện tại bao nhiêu lỗi"
+→ switch_sub_tab(data) + clear_filters + filter_month(tháng-này-từ-THỜI-GIAN-THỰC) + sum_errors
 
-  // ── Model rotation — ưu tiên model ổn định, tự động chuyển khi hết quota ──
+"nhóm lỗi / loại lỗi nhiều nhất"
+→ switch_sub_tab(dashboard) + clear_filters + read_dashboard_groups(by=category)
+
+"LINH KIỆN lỗi nhiều nhất / linh kiện nào lỗi nhiều / phụ kiện lỗi"
+→ switch_sub_tab(dashboard) + clear_filters + read_dashboard_groups(by=accessory)  ← by=ACCESSORY
+
+"nguyên nhân lỗi nhiều nhất"
+→ switch_sub_tab(dashboard) + clear_filters + read_dashboard_groups(by=cause)
+
+"năm 2025 nhóm lỗi / linh kiện nào nhiều nhất"
+→ switch_sub_tab(dashboard) + clear_filters + filter_month("2025") + read_dashboard_groups(by=category|accessory)
+
+"S88 tỷ lệ lỗi năm 2025"
+→ switch_sub_tab(rate) + clear_filters + filter_product("S88") + filter_month("2025") + sum_rate
+
+"S88 bao nhiêu lỗi năm 2025"
+→ switch_sub_tab(data) + clear_filters + filter_product("S88") + filter_month("2025") + sum_errors
+
+"chi tiết lỗi / lỗi gì nhiều ở S88"
+→ switch_sub_tab(dashboard) + clear_filters + filter_product("S88") + read_dashboard_groups(by=category)
+
+"lỗi Bơm thuộc model nào"
+→ switch_sub_tab(dashboard) + clear_filters + filter_field(category,"Bơm") + read_dashboard_groups(by=product)
+
+"số lỗi dưới 1 tháng / lỗi bơm dưới 1 tháng sử dụng"
+→ switch_sub_tab(dashboard) + clear_filters + filter_field(Time_sudung,"dưới 1 tháng") + read_dashboard_groups(by=category)
+
+"từ 1-2 năm sử dụng lỗi gì nhiều / mốc 6-12 tháng"
+→ switch_sub_tab(dashboard) + clear_filters + filter_field(Time_sudung,"từ 1-2 năm") + read_dashboard_groups(by=category)
+
+"lỗi dưới 6 tháng sử dụng / trong vòng nửa năm đầu"
+→ switch_sub_tab(dashboard) + clear_filters + filter_field(Time_sudung,["dưới 1 tháng","từ 2-3 tháng","từ 3-6 tháng"]) + read_dashboard_groups(by=category)
+
+"lỗi trên 6 tháng / từ nửa năm trở lên / dài hạn"
+→ switch_sub_tab(dashboard) + clear_filters + filter_field(Time_sudung,["từ 6-12 tháng","từ 1-2 năm"]) + read_dashboard_groups(by=category)
+
+"lỗi dưới 1 năm sử dụng / trong vòng 12 tháng đầu"
+→ switch_sub_tab(dashboard) + clear_filters + filter_field(Time_sudung,["dưới 1 tháng","từ 2-3 tháng","từ 3-6 tháng","từ 6-12 tháng"]) + read_dashboard_groups(by=category)
+
+"lỗi dưới 2 năm / trong vòng 2 năm sử dụng / tất cả trừ không xác định"
+→ switch_sub_tab(dashboard) + clear_filters + filter_field(Time_sudung,["dưới 1 tháng","từ 2-3 tháng","từ 3-6 tháng","từ 6-12 tháng","từ 1-2 năm"]) + read_dashboard_groups(by=category)
+
+"model nào TLL% tệ nhất năm 2025"
+→ switch_sub_tab(rate) + clear_filters + filter_month("2025") + read_top_products(by=rate,limit=10)
+
+"model nào lỗi nhiều nhất năm 2025"
+→ switch_sub_tab(rate) + clear_filters + filter_month("2025") + read_top_products(by=errors,limit=10)
+
+"xu hướng TLL% / diễn biến TLL% 3 tháng gần nhất"
+→ switch_sub_tab(rate) + clear_filters + filter_month(3 tháng gần) + analyze_trend
+
+"từ 05/2025-04/2026 sản phẩm nào TLL% cao nhất / diễn biến lỗi từ X đến Y"
+→ switch_sub_tab(rate) + clear_filters + filter_month(range) + read_top_products(by=rate,limit=10) + analyze_trend
+
+"dữ liệu saleout năm 2025"
+→ switch_sub_tab(rate) + read_saleout_table(year=2025)
+
+"hi / xin chào"
+→ {"actions":[],"reply":"Xin chào! Tôi có thể lọc, phân tích xu hướng, hoặc trả lời câu hỏi về số liệu."}
+
+Năm không hợp lệ (1015, 3000...) → KHÔNG gọi tools, reply giải thích.`;
+
+  // ── Model rotation — Gemini trước (free tier: ~20 RPD/model), fallback Groq khi exhausted ──
   const GROQ_MODELS = [
-    'llama-3.3-70b-versatile',
-    'meta-llama/llama-4-scout-17b-16e-instruct',
-    'llama-3.1-8b-instant',
+    'meta-llama/llama-4-scout-17b-16e-instruct',  // #1: MoE mạnh nhất Groq, 500K TPD ~167 req/ngày
+    'qwen/qwen3-32b',                              // #2: tiếng Việt tốt nhất Groq, 500K TPD
+    'llama-3.3-70b-versatile',                     // #3: ổn định, 100K TPD ~33 req/ngày
+    'llama-3.1-8b-instant',                        // #7: yếu, dùng sau Gemini, 500K TPD
+    'compound-beta',                               // #8: emergency, 250 RPD, no TPD limit
+    'compound-beta-mini',                          // #9: emergency, 250 RPD, no TPD limit
+  ];
+  const GEMINI_MODELS = [
+    'gemini-2.5-flash',       // #1: chính, 20 RPD (free), 1K RPM
+    'gemini-2.5-flash-lite',  // #2: fallback nhanh, 20 RPD (free)
+    'gemini-2.0-flash-001',   // #3: stable alias, RPD cao hơn
+    'gemini-2.0-flash',       // #4: fallback nếu alias trên lỗi
   ];
   const _skipModels    = new Map(); // model → timestamp hết hạn skip (tạm thời, không vĩnh viễn)
   const _skipModelsPerm= new Set(); // models bị tắt hẳn (decommissioned/hết TPD ngày)
@@ -853,7 +1092,8 @@ Năm không hợp lệ (1015, 3000...)→KHÔNG gọi tools, reply giải thích
       || body.includes('RESOURCE_EXHAUSTED') || body.includes('quota');
     // 413 có 2 nghĩa: "per minute" exceeded → retry; còn lại → request quá lớn cho model này → switch
     if (status === 413) return !body.includes('per minute');
-    if (status === 400) return body.includes('decommissioned') || body.includes('no longer supported');
+    if (status === 400) return body.includes('decommissioned') || body.includes('no longer supported')
+      || body.includes('response_format') || body.includes('not supported');
     return false;
   }
 
@@ -983,7 +1223,11 @@ Năm không hợp lệ (1015, 3000...)→KHÔNG gọi tools, reply giải thích
       const m = raw.match(/\{[\s\S]*\}/);
       try { parsed = JSON.parse(m?.[0] || '{}'); } catch (_) {}
     }
+    return _processParsedAI(parsed, userText, onActionStep);
+  }
 
+  // ── Shared AI response processor (Groq + Gemini dùng chung) ─────────────
+  async function _processParsedAI(parsed, userText, onActionStep) {
     // Normalize actions: một số model dùng key "tool"/"function" thay vì "name", hoặc trả về string
     // Một số model trả về "switch_sub_tab(rate)" thay vì {name:"switch_sub_tab", args:{tab:"rate"}}
     const rawActions = (Array.isArray(parsed.actions) ? parsed.actions : [])
@@ -1000,13 +1244,16 @@ Năm không hợp lệ (1015, 3000...)→KHÔNG gọi tools, reply giải thích
     const replyRaw   = parsed.reply || '';
     const reply      = (typeof replyRaw === 'string' ? replyRaw : JSON.stringify(replyRaw)).trim();
 
+    // Lưu user text để executor có thể tham chiếu (auto-correct args)
+    _lastUserText = userText || '';
+
     // Chặn action bị hallucinate dựa vào nội dung câu hỏi của user
-    const lower = (userText || '').toLowerCase();
+    const lower = _lastUserText.toLowerCase();
     const allowSwitch  = /\bspm1\b|\bspm2\b|chuyển dataset|thiết kế mới|tất cả lỗi linh kiện/.test(lower);
     const allowTopN    = /\btop\s*\d|\bhiển thị\s+\d/.test(lower);
     const allowSort    = /sắp xếp|giảm dần|tăng dần/.test(lower);
     // filter_product: chỉ cho phép khi user đề cập đến sản phẩm/SP/model cụ thể
-    const allowProduct = /lọc\s*(sp|sản phẩm|model)|sản phẩm|tên sp|\bsp\b|\bmodel\b|kae|kad|kaq|kah|platinum|livotec|wpk|\bs\d{2,}\b|\b[a-zđ]{1,4}\d+[a-z]*\b|\b\d+[a-z]+\b/.test(lower);
+    const allowProduct = /lọc\s*(sp|sản phẩm|model)|sản phẩm|tên sp|\bsp\b|\bmodel\b|\bmáy\b|kae|kad|kaq|kah|platinum|livotec|wpk|\bs\d{2,}\b|\b[a-zđ]{1,4}\d+[a-z]*\b|\b\d+[a-z]+\b/.test(lower);
     const actions = rawActions.filter(a => {
       if (a.name === 'switch_main_tab' && !allowSwitch)  return false;
       // switch_sub_tab: cho phép AI tự động chuyển tab theo ngữ cảnh câu hỏi
@@ -1016,11 +1263,61 @@ Năm không hợp lệ (1015, 3000...)→KHÔNG gọi tools, reply giải thích
       return true;
     });
 
-    // Auto-prepend clear_filters trước mỗi filter query để xoá state cũ
-    // (AI đôi khi quên gọi clear_filters → filter cũ còn lại → kết quả sai)
-    const hasNewFilter = actions.some(a => a.name === 'filter_month' || a.name === 'filter_product');
+    // ── Keyword fallback cho AI 8B hay fail ─────────────────────────────────
+    // Khi AI không tạo được read tool nào (actions rỗng hoặc chỉ có switch/clear),
+    // tự động inject đúng tool dựa vào keywords trong câu hỏi user
+    const hasReadTool = actions.some(a =>
+      ['read_dashboard_groups','read_top_products','sum_errors','sum_rate',
+       'analyze_trend','read_saleout_table'].includes(a.name));
+
+    if (!hasReadTool) {
+      // Pattern 1: hỏi về linh kiện/nhóm lỗi/nguyên nhân → dashboard
+      const isDashQ =
+        /linh kiện|linh_kien|accessory|phụ kiện|phụ tùng|bộ phận/.test(lower) ||
+        /nguyên nhân|cause|lý do lỗi/.test(lower) ||
+        /nhóm lỗi|loại lỗi|lỗi nào.*nhiều|nhiều.*nhất.*(lỗi|nhóm)|phân loại lỗi/.test(lower) ||
+        /chi tiết lỗi|biểu đồ lỗi/.test(lower);
+
+      if (isDashQ) {
+        const byVal =
+          /linh kiện|linh_kien|accessory|phụ kiện|phụ tùng|bộ phận/.test(lower) ? 'accessory' :
+          /nguyên nhân|cause|lý do lỗi/.test(lower) ? 'cause' : 'category';
+        if (!actions.some(a => a.name === 'switch_sub_tab'))
+          actions.unshift({ name: 'switch_sub_tab', args: { tab: 'dashboard' } });
+        if (!actions.some(a => a.name === 'clear_filters'))
+          actions.push({ name: 'clear_filters', args: {} });
+        actions.push({ name: 'read_dashboard_groups', args: { by: byVal, limit: 10 } });
+
+      // Pattern 2: hỏi tổng lỗi/bao nhiêu lỗi → sum_errors
+      } else if (/bao nhiêu lỗi|tổng lỗi|đếm lỗi|có bao nhiêu lỗi|số lỗi/.test(lower)) {
+        const now = new Date();
+        // Detect "tháng này/hiện tại" → filter tháng hiện tại
+        if (/tháng này|tháng hiện tại|tháng nay/.test(lower)) {
+          const mCode = `Y${String(now.getFullYear()).slice(-2)}${String(now.getMonth()+1).padStart(2,'0')}`;
+          if (!actions.some(a => a.name === 'switch_sub_tab'))
+            actions.unshift({ name: 'switch_sub_tab', args: { tab: 'data' } });
+          actions.push({ name: 'clear_filters', args: {} });
+          actions.push({ name: 'filter_month', args: { month: mCode } });
+        } else if (!actions.some(a => a.name === 'switch_sub_tab')) {
+          actions.unshift({ name: 'switch_sub_tab', args: { tab: 'data' } });
+        }
+        actions.push({ name: 'sum_errors', args: {} });
+
+      // Pattern 3: hỏi tỷ lệ lỗi/TLL% → sum_rate
+      } else if (/tỷ lệ lỗi|tll%|tll ?%|lỗi bao nhiêu %/.test(lower)) {
+        if (!actions.some(a => a.name === 'switch_sub_tab'))
+          actions.unshift({ name: 'switch_sub_tab', args: { tab: 'rate' } });
+        actions.push({ name: 'sum_rate', args: {} });
+      }
+    }
+
+    // Auto-inject clear_filters khi AI quên:
+    // 1) Trước filter_month/filter_product (filter mới → cần xoá filter cũ)
+    // 2) Trước read_dashboard_groups khi không có filter action nào (đọc toàn bộ → cần xoá filter cũ)
+    const hasNewFilter     = actions.some(a => a.name === 'filter_month' || a.name === 'filter_product' || a.name === 'filter_field');
     const hasExplicitClear = actions.some(a => a.name === 'clear_filters');
-    if (hasNewFilter && !hasExplicitClear) {
+    const hasDashRead      = actions.some(a => a.name === 'read_dashboard_groups');
+    if (!hasExplicitClear && (hasNewFilter || (hasDashRead && !hasNewFilter))) {
       actions.unshift({ name: 'clear_filters', args: {} });
     }
 
@@ -1030,6 +1327,33 @@ Năm không hợp lệ (1015, 3000...)→KHÔNG gọi tools, reply giải thích
     if (clearIdx !== -1 && firstFilterIdx !== -1 && clearIdx > firstFilterIdx) {
       const [clearAction] = actions.splice(clearIdx, 1);
       actions.splice(firstFilterIdx, 0, clearAction);
+    }
+
+    // Auto-add analyze_trend khi user hỏi TLL% theo dải tháng nhưng AI quên phân tích xu hướng
+    // Điều kiện: có filter_month (≥ 2 tháng hoặc cả năm) + có sum_rate/read_top_products(rate) + không có analyze_trend
+    const hasMonthFilter  = actions.some(a => a.name === 'filter_month');
+    const hasRateRead     = actions.some(a => a.name === 'sum_rate' || (a.name === 'read_top_products' && (a.args?.by === 'rate' || a.args?.by === 'errors')));
+    const hasTrendAlready = actions.some(a => a.name === 'analyze_trend');
+    const isTrendQ = /diễn biến|xu hướng|theo tháng|qua các tháng|từ tháng|từ \d{2}\/\d{4}|từ \d{4}|đến \d{2}\/\d{4}/.test(lower);
+    if (hasMonthFilter && hasRateRead && !hasTrendAlready && isTrendQ) {
+      actions.push({ name: 'analyze_trend', args: {} });
+    }
+
+    // Nếu filter_field có trong actions → đảm bảo tab dashboard và có read tool
+    const hasFilterField = actions.some(a => a.name === 'filter_field');
+    if (hasFilterField) {
+      for (const a of actions) {
+        if (a.name === 'switch_sub_tab' && a.args?.tab !== 'dashboard') {
+          a.args.tab = 'dashboard';
+        }
+      }
+      if (!actions.some(a => a.name === 'switch_sub_tab')) {
+        actions.unshift({ name: 'switch_sub_tab', args: { tab: 'dashboard' } });
+      }
+      if (!actions.some(a => a.name === 'read_dashboard_groups')) {
+        const byVal = /model nào|sản phẩm nào|máy nào|sp nào/.test(lower) ? 'product' : 'product';
+        actions.push({ name: 'read_dashboard_groups', args: { by: byVal, limit: 10 } });
+      }
     }
 
     // Sắp xếp thứ tự chuẩn: switch_tab → clear → filter → other → read
@@ -1074,25 +1398,137 @@ Năm không hợp lệ (1015, 3000...)→KHÔNG gọi tools, reply giải thích
     return { text, toolResults };
   }
 
-  // ── Main sendMessage (Groq-only) ─────────────────────────────────────────
+  // ── Gemini API — JSON mode, model rotation + retry ──────────────────────
+  function _shouldSkipGemini(status, body) {
+    if (status === 429) {
+      // Hết quota ngày → skip vĩnh viễn; hết quota phút → retry
+      return (body.includes('RESOURCE_EXHAUSTED') || body.includes('quota')) &&
+        !body.includes('per minute') && !body.includes('minute');
+    }
+    if (status === 404) return true; // model không tồn tại
+    if (status === 400) return body.includes('API_KEY_INVALID') || body.includes('not supported');
+    return false;
+  }
+
+  async function _callGemini(userText, onActionStep, onDisambiguate) {
+    _disambiguateCallback = onDisambiguate || null;
+    const key = _geminiKeyDirect || APP_CONFIG.chatbot?.geminiApiKey;
+    if (!key) return null;
+
+    const systemMsg = _buildSystemMessage();
+    const RETRY_DELAYS = [5000, 15000, 40000];
+    let data;
+
+    const _nextModel = () => GEMINI_MODELS.find(m => !_isSkipped(m)) || null;
+
+    while (true) {
+      const model = _nextModel();
+      if (!model) throw new Error('ALL_MODELS_EXHAUSTED');
+
+      let switched = false;
+      for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+        const res = await fetch(apiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemMsg }] },
+            contents: [{ role: 'user', parts: [{ text: userText }] }],
+            generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 420 },
+          }),
+        });
+
+        if (!res.ok) {
+          const errBody = await res.text();
+          if (_shouldSkipGemini(res.status, errBody)) {
+            _skipModelsPerm.add(model);
+            const next = _nextModel();
+            onActionStep?.({ tool: '_retry', input: { note: `${model} không khả dụng → chuyển sang ${next || 'hết model'}` }, status: next ? 'running' : 'error' });
+            if (next) onActionStep?.({ tool: '_retry', input: {}, status: 'done' });
+            switched = true;
+            break;
+          }
+          if (res.status === 429 || res.status === 503) {
+            if (attempt >= RETRY_DELAYS.length) throw new Error(`Gemini API ${res.status}: ${errBody.slice(0, 300)}`);
+            const retryMatch = errBody.match(/retryDelay[^"]*"(\d+)s"/) || errBody.match(/try again in (\d+\.?\d*)s/i);
+            const wait = retryMatch ? Math.ceil(parseFloat(retryMatch[1]) * 1000) + 1000 : RETRY_DELAYS[attempt];
+            onActionStep?.({ tool: '_retry', input: { attempt: attempt + 1, wait }, status: 'running' });
+            await new Promise(r => setTimeout(r, wait));
+            onActionStep?.({ tool: '_retry', input: {}, status: 'done' });
+            continue;
+          }
+          if (res.status === 403 || res.status === 401) {
+            _skipModels.set(model, Date.now() + SKIP_TEMP_MS);
+            const next = _nextModel();
+            onActionStep?.({ tool: '_retry', input: { note: `${model} → key lỗi, thử ${next || 'lại sau'}` }, status: next ? 'running' : 'error' });
+            if (next) onActionStep?.({ tool: '_retry', input: {}, status: 'done' });
+            switched = true;
+            break;
+          }
+          throw new Error(`Gemini API ${res.status}: ${errBody.slice(0, 160)}`);
+        }
+
+        data = await res.json();
+        break;
+      }
+      if (!switched) break;
+    }
+
+    const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    let parsed = {};
+    try { parsed = JSON.parse(raw); } catch (_) {
+      const m = raw.match(/\{[\s\S]*\}/);
+      try { parsed = JSON.parse(m?.[0] || '{}'); } catch (_) {}
+    }
+    return _processParsedAI(parsed, userText, onActionStep);
+  }
+
+  // ── Main sendMessage (Gemini → Groq fallback) [TẠM THỜI: test Gemini trước] ──
   async function sendMessage(userText, { onActionStep, onDisambiguate } = {}) {
-    const hasKey = !!(_groqKeyDirect || APP_CONFIG.chatbot?.groqApiKey);
-    const hasWorker = APP_CONFIG.chatbot?.groqWorkerUrl && !APP_CONFIG.chatbot.groqWorkerUrl.includes('YOUR-WORKER');
-    if (!hasKey && !hasWorker) {
-      return { source: 'none', message: 'Chưa cấu hình Groq API key hoặc Worker URL trong appConfig.js.' };
+    const hasGroq = !!(_groqKeyDirect || APP_CONFIG.chatbot?.groqApiKey ||
+      (APP_CONFIG.chatbot?.groqWorkerUrl && !APP_CONFIG.chatbot.groqWorkerUrl.includes('YOUR-WORKER')));
+    const hasGemini = !!(_geminiKeyDirect || APP_CONFIG.chatbot?.geminiApiKey);
+    if (!hasGroq && !hasGemini) {
+      return { source: 'none', message: 'Chưa cấu hình API key (Groq hoặc Gemini) trong appConfig.js.' };
     }
     try {
-      const result = await _callGroq(userText, onActionStep, onDisambiguate);
+      let result = null;
+      let provider = 'gemini';
+
+      // [TEST] Thử Gemini trước để kiểm tra độ ổn định
+      if (hasGemini) {
+        try {
+          result = await _callGemini(userText, onActionStep, onDisambiguate);
+        } catch (geminiErr) {
+          if (geminiErr.message !== 'ALL_MODELS_EXHAUSTED') throw geminiErr;
+          _resetTempSkips();
+          if (hasGroq) {
+            onActionStep?.({ tool: '_retry', input: { note: 'Gemini hết quota → chuyển Groq...' }, status: 'running' });
+            onActionStep?.({ tool: '_retry', input: {}, status: 'done' });
+          }
+        }
+      }
+
+      // Fallback Groq nếu Gemini không có key hoặc đã exhausted
+      if (!result && hasGroq) {
+        provider = 'groq';
+        result = await _callGroq(userText, onActionStep, onDisambiguate);
+      }
+
+      if (!result) {
+        return { source: 'error', message: 'Chưa cấu hình API key hợp lệ.' };
+      }
+
       _history.push(
         { role: 'user',  parts: [{ text: userText }] },
         { role: 'model', parts: [{ text: result.text }] },
       );
       if (_history.length > 20) _history = _history.slice(-20);
-      return { source: 'groq', message: result.text };
+      return { source: provider, message: result.text };
     } catch (err) {
       console.error('[ChatbotService]', err);
       if (err.message === 'ALL_MODELS_EXHAUSTED') {
-        _resetTempSkips(); // reset để lần hỏi tiếp theo thử lại từ đầu
+        _resetTempSkips();
         return { source: 'error', message: 'AI đang bận tạm thời. Vui lòng thử lại sau vài giây.' };
       }
       if (err.message === 'KEY_INVALID') {

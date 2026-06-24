@@ -330,6 +330,79 @@
 #saleout-data-subsection::-webkit-scrollbar-thumb:hover,
 #saleout-rate-subsection::-webkit-scrollbar-thumb:hover  { background: #1E293B; }
 
+/* ── PDF / Print Styles ─────────────────────────────────────────── */
+@media print {
+  /* Page setup */
+  @page { size: A4 landscape; margin: 1.2cm 1.5cm; }
+
+  /* Hide all UI chrome */
+  header,
+  aside,
+  #main-tab-bar,
+  #sub-tab-bar,
+  #chatbot-panel,
+  #chatbot-float-btn,
+  #data-loading,
+  #btn-export-pdf,
+  #btn-export-excel { display: none !important; }
+
+  /* Show print title */
+  #print-title { display: block !important; }
+
+  /* Reset page layout */
+  body { background: white !important; font-size: 11px !important; }
+
+  #main-layout {
+    height: auto !important;
+    display: block !important;
+    overflow: visible !important;
+  }
+
+  main {
+    width: 100% !important;
+    overflow: visible !important;
+    height: auto !important;
+    flex: none !important;
+    display: block !important;
+  }
+
+  /* Content sections: remove fixed height + overflow clips */
+  #pivot-section,
+  #saleout-section,
+  #saleout-rate-subsection,
+  #saleout-data-subsection,
+  #dashboard-section,
+  #saleout-table-container,
+  #dashboard-container,
+  #pivot-table-container,
+  #rate-by-product-chart-wrap,
+  #rate-by-month-chart-wrap,
+  #chart-canvas-wrap {
+    overflow: visible !important;
+    max-height: none !important;
+    height: auto !important;
+    flex: none !important;
+  }
+
+  /* Charts: prevent overflow clipping */
+  canvas { max-width: 100% !important; }
+
+  /* Tables: no wrap, full width */
+  table { width: 100% !important; font-size: 10px !important; }
+  th, td { white-space: nowrap; padding: 3px 6px !important; }
+
+  /* Colored TLL% cells still print */
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  /* Grid sections: stack vertically on A4 */
+  .grid { display: block !important; }
+  .grid > * { margin-bottom: 1.5rem; page-break-inside: avoid; }
+
+  /* Saleout rate grid (2 tables + 2 charts) */
+  #saleout-rate-subsection > .grid,
+  #saleout-rate-subsection > div { display: block !important; width: 100% !important; }
+}
+
 /* Chart container min height */
 #chart-canvas-wrap canvas { max-height: 320px; }
 

@@ -992,11 +992,11 @@ const SaleOutRenderer = (() => {
   }
 
   // ── Public API ───────────────────────────────────────────────────────────
-  function setData(saleoutData, errorData) {
+  function setData(saleoutData, errorData, { keepFilters = false } = {}) {
     _isLoading   = false;
     _saleoutData = saleoutData || [];
     _errorData   = errorData   || [];
-    _filters     = { months: [], shortNames: [] };
+    if (!keepFilters) _filters = { months: [], shortNames: [] };
     _tableRendered = false;
   }
 

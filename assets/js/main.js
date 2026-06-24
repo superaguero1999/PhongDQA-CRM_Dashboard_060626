@@ -56,26 +56,93 @@ window.AppState = {
       const uniqueProducts = [...new Set(data.map(r => r.product_shortname).filter(Boolean))].slice(0, 50);
       const uniqueMonths   = [...new Set(data.map(r => r.month).filter(Boolean))].sort();
 
-      // Aggregate error breakdowns from filtered records
-      const byCategory  = {}, byAccessory = {}, byCause = {};
-      for (const r of filtered) {
-        if (r.category)      byCategory[r.category]   = (byCategory[r.category]   || 0) + 1;
-        if (r.err_accessory) byAccessory[r.err_accessory] = (byAccessory[r.err_accessory] || 0) + 1;
-        if (r.cause)         byCause[r.cause]         = (byCause[r.cause]         || 0) + 1;
-      }
-      const toRanked = (obj, n) => Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, n).map(([name, count]) => ({ name, count }));
+      // Dùng PivotEngine — CHÍNH XÁC như DashboardRenderer, không cần đoán field name
+      const views = DataService.loadPivotViews();
+      const _computeFromView = (keywords) => {
+        for (const [name, cfg] of Object.entries(views)) {
+          const n = name.toLowerCase();
+          if (keywords.some(kw => n.includes(kw)) && (cfg.rows || []).length) {
+            try {
+              const pivotResult = PivotEngine.compute(filtered, cfg);
+              const chartData   = PivotEngine.toChartData(pivotResult, 'bar');
+              const labels      = chartData.labels || [];
+              // Với single-row pivot (rows.length===1, cols=[]), dùng grand totals
+              const totals = pivotResult.grandTotals?.rows || {};
+              if (!labels.length) return [];
+              return labels
+                .map(nm => ({ name: nm, count: Math.round(totals[nm]?.[0] ?? 0) }))
+                .filter(r => r.name && r.name !== '—' && r.count > 0)
+                .sort((a, b) => b.count - a.count);
+            } catch (_) {}
+          }
+        }
+        return [];
+      };
+
+      // Fallback khi không tìm được pivot view: tự đếm theo field name
+      const _detectField = (candidates) => {
+        if (!data.length) return candidates[0];
+        const keys = Object.keys(data[0]);
+        return candidates.find(c => keys.some(k => k === c))
+          || candidates.find(c => keys.some(k => k.toLowerCase() === c.toLowerCase()))
+          || candidates.find(c => keys.some(k => k.toLowerCase().replace(/[\s_]/g,'').includes(c.toLowerCase().replace(/[\s_]/g,''))))
+          || candidates[0];
+      };
+      const _countByField = (field, n) => {
+        const map = {};
+        for (const r of filtered) {
+          const v = r[field];
+          if (v) map[v] = (map[v] || 0) + 1;
+        }
+        return Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, n).map(([name, count]) => ({ name, count }));
+      };
+
+      const _best = (v, fallbackFn) => v.length ? v : fallbackFn();
+      const topByCategory  = _best(
+        _computeFromView(['nhóm lỗi','nhom loi','category','loại lỗi']),
+        () => _countByField(_detectField(['category','Nhóm lỗi','nhom_loi']), 10));
+      const topByAccessory = _best(
+        _computeFromView(['linh kiện','linh_kien','accessory','phụ kiện']),
+        () => _countByField(_detectField(['err_accessory','Linh kiện lỗi','accessory','linh_kien']), 10));
+      const topByCause = _best(
+        _computeFromView(['nguyên nhân','nguyen nhan','cause']),
+        () => _countByField(_detectField(['cause','Nguyên nhân lỗi','nguyen_nhan']), 10));
+
+      // Xếp hạng model/SP: scan data trực tiếp
+      const fShortname = _detectField(['product_shortname','Tên rút gọn','ten_rut_gon']);
+      const fModelCode = _detectField(['model_code','Mã sản phẩm','model','sku']);
+      const topByProduct = _countByField(fShortname || fModelCode, 20);
 
       return {
-        totalCount:      data.length,
-        filteredCount:   filtered.length,
+        totalCount:  data.length,
+        filteredCount: filtered.length,
         uniqueProducts,
         uniqueMonths,
         activeSlicers:   slicers.map(s => ({ field: s.field, values: s.selectedValues })),
-        topByCategory:   toRanked(byCategory,  10),  // Nhóm lỗi
-        topByAccessory:  toRanked(byAccessory, 10),  // Linh kiện lỗi
-        topByCause:      toRanked(byCause,     10),  // Nguyên nhân lỗi
+        topByCategory,
+        topByAccessory,
+        topByCause,
+        topByProduct,
       };
     } catch (_) { return { totalCount: 0, filteredCount: 0, uniqueProducts: [], uniqueMonths: [], activeSlicers: [], topByCategory: [], topByAccessory: [], topByCause: [] }; }
+  },
+
+  // Trả về TẤT CẢ unique values của 1 field trong dữ liệu đã filter (dùng bởi ChatbotService để tìm kiếm rộng hơn top-N)
+  getAllFieldValues(fieldType) {
+    try {
+      const filtered = SlicerService.getFilteredData(_allData || [], '__ai__');
+      const CANDIDATES = {
+        category:      ['category','Nhóm lỗi','nhom_loi'],
+        err_accessory: ['err_accessory','Linh kiện lỗi','accessory','linh_kien'],
+        cause:         ['cause','Nguyên nhân lỗi','nguyen_nhan'],
+      };
+      const keys = (_allData[0] ? Object.keys(_allData[0]) : []);
+      const cands = CANDIDATES[fieldType] || [fieldType];
+      const field = cands.find(c => keys.includes(c))
+        || cands.find(c => keys.some(k => k.toLowerCase() === c.toLowerCase()))
+        || cands[0];
+      return SlicerService.getUniqueValues(filtered, field);
+    } catch (_) { return []; }
   },
 };
 
@@ -167,7 +234,8 @@ async function _loadSpm2DataBackground() {
     SaleOutRenderer.setEcnMap(EcnService.buildEcnMap(_spm2Ecn));
     updateDataStats();
     SaleOutRenderer.setExtraFilters(_soFiltersFromLS('spm2'));
-    SaleOutRenderer.setData(_saleoutData, _allData);
+    // keepFilters: true để không reset filter chatbot đang dùng khi background load xong
+    SaleOutRenderer.setData(_saleoutData, _allData, { keepFilters: true });
     const soSection = document.getElementById('saleout-section');
     if (soSection && soSection.style.display !== 'none') SaleOutRenderer.render();
     else SaleOutRenderer.renderSidebar();
@@ -515,6 +583,40 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
+
+  // Export PDF button
+  document.getElementById('btn-export-pdf')?.addEventListener('click', () => {
+    const ds  = _activeDataset === 'spm2' ? 'SPM2' : 'SPM1';
+    const pivotVisible = document.getElementById('pivot-section')?.style.display !== 'none';
+    const dashVisible  = document.getElementById('dashboard-section')?.style.display !== 'none';
+    const dataVisible  = document.getElementById('saleout-data-subsection')?.style.display !== 'none';
+
+    // Build tab label
+    let tabLabel = 'Tỷ lệ lỗi (TLL)';
+    if (pivotVisible)   tabLabel = 'Phân tích Pivot';
+    else if (dashVisible) tabLabel = 'Biểu đồ chi tiết lỗi';
+    else if (dataVisible) tabLabel = 'Dữ liệu chi tiết';
+
+    // Build filter context for subtitle
+    const s = window.AppState?.getSummary?.() || {};
+    const parts = [];
+    if (s.selectedMonths?.length)   parts.push(`Tháng: ${s.selectedMonths.join(', ')}`);
+    if (s.selectedProducts?.length) parts.push(`SP: ${s.selectedProducts.join(', ')}`);
+    const filterText = parts.length ? parts.join(' | ') : 'Toàn bộ dữ liệu';
+
+    // Update print title
+    const today = new Date().toLocaleDateString('vi-VN');
+    document.getElementById('print-title-text').textContent =
+      `CRM Dashboard (${ds}) — ${tabLabel}`;
+    document.getElementById('print-title-sub').textContent =
+      `Bộ lọc: ${filterText} | Xuất ngày ${today}`;
+
+    // Set document title for PDF filename suggestion
+    const origTitle = document.title;
+    document.title = `CRM_${ds}_${tabLabel.replace(/\s/g, '_')}_${today.replace(/\//g, '-')}`;
+    window.print();
+    document.title = origTitle;
+  });
 
   // Import ECN button
   const importEcnBtn = document.getElementById('btn-import-ecn');
