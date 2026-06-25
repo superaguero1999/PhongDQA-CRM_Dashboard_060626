@@ -1483,7 +1483,7 @@ Năm không hợp lệ (1015, 3000...) → KHÔNG gọi tools, reply giải thí
     return _processParsedAI(parsed, userText, onActionStep);
   }
 
-  // ── Main sendMessage (Gemini → Groq fallback) [TẠM THỜI: test Gemini trước] ──
+  // ── Main sendMessage (Groq → Gemini fallback) ──
   async function sendMessage(userText, { onActionStep, onDisambiguate } = {}) {
     const hasGroq = !!(_groqKeyDirect || APP_CONFIG.chatbot?.groqApiKey ||
       (APP_CONFIG.chatbot?.groqWorkerUrl && !APP_CONFIG.chatbot.groqWorkerUrl.includes('YOUR-WORKER')));
@@ -1493,26 +1493,26 @@ Năm không hợp lệ (1015, 3000...) → KHÔNG gọi tools, reply giải thí
     }
     try {
       let result = null;
-      let provider = 'gemini';
+      let provider = 'groq';
 
-      // [TEST] Thử Gemini trước để kiểm tra độ ổn định
-      if (hasGemini) {
+      // Ưu tiên Groq (nhanh hơn 3-5x)
+      if (hasGroq) {
         try {
-          result = await _callGemini(userText, onActionStep, onDisambiguate);
-        } catch (geminiErr) {
-          if (geminiErr.message !== 'ALL_MODELS_EXHAUSTED') throw geminiErr;
+          result = await _callGroq(userText, onActionStep, onDisambiguate);
+        } catch (groqErr) {
+          if (groqErr.message !== 'ALL_MODELS_EXHAUSTED') throw groqErr;
           _resetTempSkips();
-          if (hasGroq) {
-            onActionStep?.({ tool: '_retry', input: { note: 'Gemini hết quota → chuyển Groq...' }, status: 'running' });
+          if (hasGemini) {
+            onActionStep?.({ tool: '_retry', input: { note: 'Groq hết quota → chuyển Gemini...' }, status: 'running' });
             onActionStep?.({ tool: '_retry', input: {}, status: 'done' });
           }
         }
       }
 
-      // Fallback Groq nếu Gemini không có key hoặc đã exhausted
-      if (!result && hasGroq) {
-        provider = 'groq';
-        result = await _callGroq(userText, onActionStep, onDisambiguate);
+      // Fallback Gemini nếu Groq không có key hoặc đã exhausted
+      if (!result && hasGemini) {
+        provider = 'gemini';
+        result = await _callGemini(userText, onActionStep, onDisambiguate);
       }
 
       if (!result) {
